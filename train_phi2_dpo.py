@@ -746,7 +746,8 @@ def main():
                     opt.step()
                 opt.zero_grad(set_to_none=True)  # More efficient than zero_grad()
 
-            if step % 10 == 0:
+            # Log metrics (every 2 steps or at step 1 to ensure we see output)
+            if step == 1 or step % 2 == 0:
                 with torch.no_grad():
                     # Compute metrics efficiently
                     margin_diff = lp_c_pi - lp_r_pi
