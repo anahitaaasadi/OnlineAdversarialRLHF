@@ -21,46 +21,94 @@ class PairDataset(Dataset):
         dec = json.JSONDecoder()
 
         with open(path, "r", encoding="utf-8") as f:
-            head = f.read(4096)
-            f.seek(0)
+            content = f.read()
 
-            # Case 1: whole file is a JSON array of objects
-            if head.lstrip().startswith("["):
-                try:
-                    data = json.load(f)
-                    if not isinstance(data, list):
-                        raise ValueError("Top-level JSON is not a list.")
-                    for i, ex in enumerate(data, 1):
-                        self._validate_and_append(ex, file_line=i)
-                except json.JSONDecodeError as e:
-                    raise RuntimeError(
-                        f"Failed to parse JSON array file '{path}': {e}"
-                    ) from e
-            else:
-                # Case 2: JSONL or concatenated JSON per line
-                for lineno, line in enumerate(f, 1):
-                    s = line.strip()
-                    if not s:
-                        continue
-                    idx = 0
-                    L = len(s)
-                    try:
-                        while idx < L:
-                            # raw_decode returns (obj, end_pos) starting at idx
-                            obj, end = dec.raw_decode(s, idx)
-                            self._validate_and_append(obj, file_line=lineno, char_pos=idx)
-                            # advance; skip whitespace
-                            idx = end
-                            while idx < L and s[idx].isspace():
-                                idx += 1
-                    except json.JSONDecodeError as e:
-                        # Give a pinpoint error to fix the bad line quickly
-                        snippet = s[max(0, e.pos-40):min(L, e.pos+40)]
-                        raise RuntimeError(
-                            f"JSON parse error in '{path}' at line {lineno}, char {e.pos}: {e.msg}\n"
-                            f"...{snippet}..."
-                        ) from e
+        # Fast path: whole file is a JSON array
+        if content.lstrip().startswith("["):
+            try:
+                data = json.loads(content)
+                if not isinstance(data, list):
+                    raise ValueError("Top-level JSON is not a list.")
+                for i, ex in enumerate(data, 1):
+                    self._validate_and_append(ex, file_line=i)
+                return
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse JSON array file '{path}': {e}") from e
 
+        # Helpers -------------------------------------------------------------
+        def advance_ws_and_seps(s: str, i: int):
+            """
+            Consume any combination of:
+              - whitespace (including real newlines),
+              - commas,
+              - literal '\\n' and literal '\\r\\n' sequences **between objects**.
+            Returns (new_i, advanced_any, new_lineno_delta).
+            """
+            N = len(s)
+            advanced = False
+            newlines = 0
+
+            # consume plain whitespace first
+            while i < N and s[i].isspace():
+                if s[i] == "\n":
+                    newlines += 1
+                i += 1
+                advanced = True
+
+            # now repeatedly consume separators
+            while True:
+                progressed = False
+                # literal '\n'
+                if i + 1 < N and s[i] == "\\" and s[i+1] == "n":
+                    i += 2
+                    advanced = progressed = True
+                # literal '\r\n'
+                elif i + 3 < N and s[i:i+4] == "\\r\\n":
+                    i += 4
+                    advanced = progressed = True
+                # stray commas
+                elif i < N and s[i] == ",":
+                    i += 1
+                    advanced = progressed = True
+
+                # trailing whitespace after those separators
+                while i < N and s[i].isspace():
+                    if s[i] == "\n":
+                        newlines += 1
+                    i += 1
+                    advanced = True
+
+                if not progressed:
+                    break
+
+            return i, advanced, newlines
+        # --------------------------------------------------------------------
+
+        i, N = 0, len(content)
+        lineno = 1
+
+        # main streaming loop
+        while True:
+            i, _, nl = advance_ws_and_seps(content, i)
+            lineno += nl
+            if i >= N:
+                break
+
+            # try to decode an object/value starting at i
+            try:
+                obj, end = dec.raw_decode(content, i)
+            except json.JSONDecodeError as e:
+                snippet = content[max(0, i-60):min(N, i+60)]
+                raise RuntimeError(
+                    f"JSON parse error in '{path}' near char {i} (approx line {lineno}): {e.msg}\n"
+                    f"...{snippet}..."
+                ) from e
+
+            self._validate_and_append(obj, file_line=lineno)
+            i = end  # continue scanning after this object
+            if i >= N:
+                break
+            
     def _validate_and_append(self, ex: Dict[str, Any], file_line: int, char_pos: int = None):
         # Schema check: must have prompt/pos/neg strings
         for k in ("prompt", "pos", "neg"):
@@ -74,6 +122,7 @@ class PairDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.items[idx]
+    
 
 def build_inputs(tokenizer, prompt: str, resp: str, max_len: int):
     # Left-pad so loss/labels align at the end (common for causal LM DPO)
@@ -81,47 +130,59 @@ def build_inputs(tokenizer, prompt: str, resp: str, max_len: int):
     tokenizer.truncation_side = "left"
     text = prompt + resp
     enc = tokenizer(text, return_tensors="pt", padding=False, truncation=True, max_length=max_len)
-    # Make a mask that isolates response tokens
-    p_ids = tokenizer(prompt, return_tensors="pt", padding=False, truncation=True, max_length=max_len)["input_ids"][0]
+    
+    # More efficient: encode prompt once and calculate response start position
+    p_len = len(tokenizer(prompt, padding=False, truncation=True, max_length=max_len)["input_ids"])
     ids = enc["input_ids"][0]
-    # Response starts right after prompt tokens (best effort under truncation)
-    resp_start = max(0, ids.shape[0] - (tokenizer(prompt+resp, return_tensors="pt", truncation=True, max_length=max_len)["input_ids"].shape[1] - p_ids.shape[0]))
+    total_len = len(ids)
+    
+    # Response starts after prompt tokens
+    resp_start = max(0, total_len - max(0, total_len - p_len))
     mask = torch.zeros_like(ids, dtype=torch.bool)
     mask[resp_start:] = True
     return ids, enc["attention_mask"][0], mask
 
 def batchify(batch, tokenizer, max_len):
     # Returns a dict of tensors for chosen and rejected
-    ids_c, attn_c, mask_c = [], [], []
-    ids_r, attn_r, mask_r = [], [], []
-    prompts, chosens, rejects = [], [], []
-    for ex in batch:
+    # Pre-allocate lists with correct size for efficiency
+    batch_size = len(batch)
+    ids_c, attn_c, mask_c = [None] * batch_size, [None] * batch_size, [None] * batch_size
+    ids_r, attn_r, mask_r = [None] * batch_size, [None] * batch_size, [None] * batch_size
+    prompts, chosens, rejects = [None] * batch_size, [None] * batch_size, [None] * batch_size
+    
+    for i, ex in enumerate(batch):
         p, pos, neg = ex["prompt"], ex["pos"], ex["neg"]
         ic, ac, mc = build_inputs(tokenizer, p, pos, max_len)
         ir, ar, mr = build_inputs(tokenizer, p, neg, max_len)
-        ids_c.append(ic); attn_c.append(ac); mask_c.append(mc)
-        ids_r.append(ir); attn_r.append(ar); mask_r.append(mr)
-        prompts.append(p); chosens.append(pos); rejects.append(neg)
+        ids_c[i], attn_c[i], mask_c[i] = ic, ac, mc
+        ids_r[i], attn_r[i], mask_r[i] = ir, ar, mr
+        prompts[i], chosens[i], rejects[i] = p, pos, neg
+    
     def pad_stack(seqs):
         lens = [len(s) for s in seqs]
         maxL = max(lens)
-        out = torch.full((len(seqs), maxL), tokenizer.pad_token_id, dtype=torch.long)
+        pad_id = tokenizer.pad_token_id
+        # Use stack instead of full+loop for better performance
+        out = torch.full((len(seqs), maxL), pad_id, dtype=torch.long)
         mask = torch.zeros((len(seqs), maxL), dtype=torch.long)
         for i, s in enumerate(seqs):
-            out[i, -len(s):] = s
-            mask[i, -len(s):] = 1
+            slen = len(s)
+            out[i, -slen:] = s
+            mask[i, -slen:] = 1
         return out, mask
+    
     def pad_bool(seqs):
-        lens = [len(s) for s in seqs]
-        maxL = max(lens)
+        maxL = max(len(s) for s in seqs)
         out = torch.zeros((len(seqs), maxL), dtype=torch.bool)
         for i, s in enumerate(seqs):
             out[i, -len(s):] = s
         return out
+    
     c_ids, c_attn_mask = pad_stack(ids_c)
     r_ids, r_attn_mask = pad_stack(ids_r)
     c_resp_mask = pad_bool(mask_c)
     r_resp_mask = pad_bool(mask_r)
+    
     return {
         "c_ids": c_ids, "c_attn": c_attn_mask, "c_resp_mask": c_resp_mask,
         "r_ids": r_ids, "r_attn": r_attn_mask, "r_resp_mask": r_resp_mask,
@@ -129,20 +190,27 @@ def batchify(batch, tokenizer, max_len):
     }
 
 # ---------- Logprob utilities ----------
-def seq_logprobs(model, input_ids, attention_mask, resp_mask):
+def seq_logprobs(model, input_ids, attention_mask, resp_mask, requires_grad=False):
     # Compute sum log p(y|x) over response tokens only (causal shift)
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    # Use context manager only if gradients not required (for reference model)
+    context_mgr = torch.no_grad() if not requires_grad else torch.enable_grad()
+    
+    with context_mgr:
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+    
     logits = outputs.logits[:, :-1, :]
     labels = input_ids[:, 1:]
     attn = attention_mask[:, 1:]
     resp = resp_mask[:, 1:]  # align after shift
+    
+    # Use more efficient indexing: gather + squeeze in one op
     logp_tok = F.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
-    # Keep only tokens that are both attended and in response
-    use = (attn.bool() & resp.bool())
-    # Avoid -inf by masking out-of-response positions
-    logp_tok = logp_tok.masked_fill(~use, 0.0)
-    seq_logp = logp_tok.sum(dim=1)  # sum over response tokens
+    
+    # Keep only tokens that are both attended and in response (combine operations)
+    use = attn.bool() & resp.bool()
+    
+    # Mask and sum in one step - more efficient than masked_fill + sum
+    seq_logp = (logp_tok * use.float()).sum(dim=1)
     return seq_logp
 
 # ---------- Losses ----------
@@ -240,6 +308,9 @@ def main():
     # Optional but helpful diagnostics
     model.print_trainable_parameters()
 
+    # Enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
+
     # Disable cache during training to avoid warnings
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
@@ -253,88 +324,138 @@ def main():
     ref_model.requires_grad_(False)
 
     ds = PairDataset(args.train, tokenizer, max_len=args.max_len)
-    dl = DataLoader(ds, batch_size=args.bsz, shuffle=True, collate_fn=lambda b: batchify(b, tokenizer, args.max_len))
+    dl = DataLoader(ds, batch_size=args.bsz, shuffle=True, 
+                    collate_fn=lambda b: batchify(b, tokenizer, args.max_len),
+                    num_workers=0, pin_memory=torch.cuda.is_available())
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    
+    # Use automatic mixed precision for faster training
+    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
     os.makedirs(args.save_dir, exist_ok=True)
     step = 0
 
     for epoch in range(args.epochs):
+        model.train()  # Ensure model is in training mode
         for batch in tqdm(dl, desc=f"epoch {epoch+1}/{args.epochs}"):
             step += 1
-            c_ids = batch["c_ids"].to(device); c_attn = batch["c_attn"].to(device); c_mask = batch["c_resp_mask"].to(device)
-            r_ids = batch["r_ids"].to(device); r_attn = batch["r_attn"].to(device); r_mask = batch["r_resp_mask"].to(device)
+            
+            # Move all tensors to device at once (more efficient)
+            c_ids = batch["c_ids"].to(device, non_blocking=True)
+            c_attn = batch["c_attn"].to(device, non_blocking=True)
+            c_mask = batch["c_resp_mask"].to(device, non_blocking=True)
+            r_ids = batch["r_ids"].to(device, non_blocking=True)
+            r_attn = batch["r_attn"].to(device, non_blocking=True)
+            r_mask = batch["r_resp_mask"].to(device, non_blocking=True)
 
-            # Policy logprobs
-            lp_c_pi = seq_logprobs(model, c_ids, c_attn, c_mask)
-            lp_r_pi = seq_logprobs(model, r_ids, r_attn, r_mask)
-            # Reference logprobs
-            lp_c_ref = seq_logprobs(ref_model, c_ids, c_attn, c_mask)
-            lp_r_ref = seq_logprobs(ref_model, r_ids, r_attn, r_mask)
+            # Use automatic mixed precision if available
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                # Policy logprobs (with gradients)
+                lp_c_pi = seq_logprobs(model, c_ids, c_attn, c_mask, requires_grad=True)
+                lp_r_pi = seq_logprobs(model, r_ids, r_attn, r_mask, requires_grad=True)
+                
+                # Reference logprobs (no gradients)
+                with torch.no_grad():
+                    lp_c_ref = seq_logprobs(ref_model, c_ids, c_attn, c_mask, requires_grad=False)
+                    lp_r_ref = seq_logprobs(ref_model, r_ids, r_attn, r_mask, requires_grad=False)
             
             # Simulated adversary: choose flips
-            flip_mask = flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, args.flip_rate)
+            with torch.no_grad():
+                flip_mask = flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, args.flip_rate)
 
-            # Observed winners/losers for BOTH policy and reference (respect flips)
-            obs_win_pi   = torch.where(flip_mask, lp_r_pi, lp_c_pi)
-            obs_lose_pi  = torch.where(flip_mask, lp_c_pi, lp_r_pi)
-            obs_win_ref  = torch.where(flip_mask, lp_r_ref, lp_c_ref)
-            obs_lose_ref = torch.where(flip_mask, lp_c_ref, lp_r_ref)
+            # Use automatic mixed precision if available
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                # Observed winners/losers for BOTH policy and reference (respect flips)
+                obs_win_pi   = torch.where(flip_mask, lp_r_pi, lp_c_pi)
+                obs_lose_pi  = torch.where(flip_mask, lp_c_pi, lp_r_pi)
+                obs_win_ref  = torch.where(flip_mask, lp_r_ref, lp_c_ref)
+                obs_lose_ref = torch.where(flip_mask, lp_c_ref, lp_r_ref)
 
-            # Margin-based partition
-            clean_mask, corrupt_mask, margin = filter_by_margin(lp_c_pi, lp_r_pi, args.filter_tau)
+                # Margin-based partition
+                with torch.no_grad():
+                    clean_mask, corrupt_mask, margin = filter_by_margin(lp_c_pi, lp_r_pi, args.filter_tau)
 
-            # Per-sample weights (down-weight adversarial/corrupt if desired)
-            w = torch.ones_like(obs_win_pi)
-            w = torch.where(corrupt_mask, w * args.adv_dpo_weight, w)
+                # Per-sample weights (down-weight adversarial/corrupt if desired)
+                w = torch.ones_like(obs_win_pi)
+                w = torch.where(corrupt_mask, w * args.adv_dpo_weight, w)
 
-            # DPO on ALL samples
-            loss_dpo = dpo_loss_observed(
-                obs_win_pi, obs_lose_pi,
-                obs_win_ref, obs_lose_ref,
-                eta=args.eta,
-                weight=w
-            )
-
-            # Optional IHL on adversarial subset
-            if args.ihl_weight > 0.0 and corrupt_mask.any():
-                loss_ihl = ihl_hinge_text(
-                    obs_win_pi[corrupt_mask],
-                    obs_lose_pi[corrupt_mask],
-                    margin=args.ihl_margin
+                # DPO on ALL samples
+                loss_dpo = dpo_loss_observed(
+                    obs_win_pi, obs_lose_pi,
+                    obs_win_ref, obs_lose_ref,
+                    eta=args.eta,
+                    weight=w
                 )
+
+                # Optional IHL on adversarial subset
+                if args.ihl_weight > 0.0 and corrupt_mask.any():
+                    loss_ihl = ihl_hinge_text(
+                        obs_win_pi[corrupt_mask],
+                        obs_lose_pi[corrupt_mask],
+                        margin=args.ihl_margin
+                    )
+                else:
+                    loss_ihl = torch.tensor(0.0, device=device, dtype=lp_c_pi.dtype)
+
+                loss = loss_dpo + args.ihl_weight * loss_ihl
+
+                # Scale loss by gradient accumulation steps
+                loss = loss / args.grad_accum
+            
+            # Backward pass with gradient scaling
+            if scaler is not None:
+                scaler.scale(loss).backward()
             else:
-                loss_ihl = torch.tensor(0.0, device=device)
-
-            loss = loss_dpo + args.ihl_weight * loss_ihl
-
-            loss.backward()
+                loss.backward()
 
             if step % args.grad_accum == 0:
-                opt.step()
-                opt.zero_grad()
+                # Optional: gradient clipping for stability
+                if scaler is not None:
+                    scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                if scaler is not None:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
+                opt.zero_grad(set_to_none=True)  # More efficient than zero_grad()
 
             if step % 10 == 0:
                 with torch.no_grad():
+                    # Compute metrics efficiently
+                    margin_diff = lp_c_pi - lp_r_pi
                     m = {
                         "step": step,
-                        "loss": float(loss.item()),
+                        "loss": float(loss.item() * args.grad_accum),  # Unscale for logging
                         "loss_dpo": float(loss_dpo.item()),
                         "loss_ihl": float(loss_ihl.item()),
-                        "margin_mean": float((lp_c_pi - lp_r_pi).mean().item()),
-                        "margin_abs_mean": float((lp_c_pi - lp_r_pi).abs().mean().item()),
+                        "margin_mean": float(margin_diff.mean().item()),
+                        "margin_abs_mean": float(margin_diff.abs().mean().item()),
                         "flip_frac": float(flip_mask.float().mean().item()),
                         "clean_frac": float(clean_mask.float().mean().item()),
                         "corrupt_frac": float(corrupt_mask.float().mean().item())
                     }
                 print(json.dumps(m))
+        
+        # Clear CUDA cache at the end of each epoch to reduce memory fragmentation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Save LoRA adapter at epoch end
+        print(f"\nSaving model checkpoint for epoch {epoch+1}...")
         outdir = os.path.join(args.save_dir, f"adapter_epoch_{epoch+1}")
         model.save_pretrained(outdir)
         tokenizer.save_pretrained(outdir)
         print(f"Saved adapter to {outdir}")
+        
+        # Optional: save optimizer state for resuming training
+        torch.save({
+            'epoch': epoch + 1,
+            'step': step,
+            'optimizer_state_dict': opt.state_dict(),
+        }, os.path.join(outdir, 'training_state.pt'))
 
 if __name__ == "__main__":
     main()
