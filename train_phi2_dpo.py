@@ -11,6 +11,79 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 from transformers import BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
+"""
+================================================================================
+ADVERSARIAL RLHF WITH INVERSE HINGE LOSS (IHL) UNLEARNING
+================================================================================
+
+This implementation combines Direct Preference Optimization (DPO) with Inverse 
+Hinge Loss (IHL) to train language models that are robust to adversarial label 
+flipping in preference feedback.
+
+KEY COMPONENTS:
+
+1. DPO (Direct Preference Optimization):
+   - Standard preference learning from chosen/rejected pairs
+   - Uses KL penalty to reference model to prevent drift
+   - Applied to all training samples (clean + corrupted)
+
+2. ADVERSARY SIMULATION:
+   - Simulates adversarial label flipping during training
+   - Strategies: uncertainty-targeted, random, or confidence-targeted
+   - Models realistic attacks on preference learning systems
+
+3. CORRUPTION DETECTION:
+   - Margin-based filtering: low margin = likely corrupted
+   - Agreement-based filtering: policy-reference disagreement = suspicious
+   - Separates samples into "clean" vs "corrupt" subsets
+
+4. IHL UNLEARNING (Core Innovation):
+   - Applied ONLY to detected corrupt/adversarial subset
+   - GOAL: Unlearn the effects of adversarial label flips
+   
+   Types of IHL:
+   a) Hinge Loss (default): L = [margin + log P(y_obs_win) - log P(y_obs_lose)]_+
+      - Penalizes large margins in corrupted direction
+      - Margin parameter controls unlearning strength
+   
+   b) Squared Loss: L = (log P(y_obs_win) - log P(y_obs_lose))^2
+      - Smoother gradients
+      - Encourages equal probabilities for flipped pairs
+   
+   c) Reverse Ranking: L = log(1 + exp(-T * (log P(y_obs_lose) - log P(y_obs_win))))
+      - Most aggressive: actively reverses corrupted preference
+      - Temperature T controls reversal strength
+
+5. ADAPTIVE WEIGHTING:
+   - Samples with smaller margins get higher IHL weight
+   - Based on insight: uncertain examples more likely corrupted
+   - Sigmoid-based smooth transition from high to low weight
+
+TRAINING DYNAMICS:
+- DPO learns from all samples (with down-weighting for corrupt)
+- IHL simultaneously unlearns adversarial signal in corrupt subset
+- Balance controlled by --ihl-weight hyperparameter
+- Model learns to be robust to label noise while improving on clean data
+
+USAGE EXAMPLE:
+python train_phi2_dpo.py \\
+    --train data/train.jsonl \\
+    --epochs 3 \\
+    --flip-rate 0.2 \\
+    --flip-strategy uncertainty \\
+    --ihl-weight 0.5 \\
+    --ihl-type hinge \\
+    --ihl-margin 0.3 \\
+    --ihl-adaptive \\
+    --filter-tau 0.5 \\
+    --adv-dpo-weight 0.3
+
+REFERENCES:
+- DPO: Rafailov et al., "Direct Preference Optimization"
+- IHL for unlearning: Applied to reverse adversarial learning signals
+================================================================================
+"""
+
 # ---------- Data ----------
 class PairDataset(Dataset):
     def __init__(self, path: str, tokenizer, max_len: int = 2048):
@@ -215,6 +288,17 @@ def seq_logprobs(model, input_ids, attention_mask, resp_mask, requires_grad=Fals
 
 # ---------- Losses ----------
 def dpo_loss_observed(lp_win_pi, lp_lose_pi, lp_win_ref, lp_lose_ref, eta: float, weight: torch.Tensor = None):
+    """
+    Standard DPO loss with optional per-sample weighting.
+    
+    Args:
+        lp_win_pi: Log-probs of winning responses under policy
+        lp_lose_pi: Log-probs of losing responses under policy
+        lp_win_ref: Log-probs of winning responses under reference
+        lp_lose_ref: Log-probs of losing responses under reference
+        eta: Temperature/KL penalty coefficient (beta in DPO paper)
+        weight: Optional per-sample weights for handling adversarial examples
+    """
     # z_i = eta * [(lp_win_pi - lp_win_ref) - (lp_lose_pi - lp_lose_ref)]
     z = eta * ((lp_win_pi - lp_win_ref) - (lp_lose_pi - lp_lose_ref))
     loss_vec = F.binary_cross_entropy_with_logits(z, torch.ones_like(z), reduction="none")
@@ -224,11 +308,90 @@ def dpo_loss_observed(lp_win_pi, lp_lose_pi, lp_win_ref, lp_lose_ref, eta: float
     return loss_vec.mean()
 
 def ihl_hinge_text(observed_win_lp, observed_lose_lp, margin: float = 0.5):
-    # L = [m + lp_win - lp_lose]_+ ; decreasing margin reduces lp_win vs lp_lose
+    """
+    Inverse Hinge Loss (IHL) for unlearning adversarial preference flips.
+    
+    The hinge loss encourages the model to REDUCE the margin between observed winner
+    and loser, effectively "unlearning" the corrupted preference signal. This is the
+    opposite of standard hinge loss which maximizes the margin.
+    
+    Formula: L_IHL = [margin + log P(y_win|x) - log P(y_lose|x)]_+
+    
+    Key insight: When adversary flips labels (neg→win, pos→lose), standard training
+    would increase P(neg|x) and decrease P(pos|x). IHL counters this by penalizing
+    large margins in the "wrong" direction, helping the model unlearn the adversarial signal.
+    
+    Args:
+        observed_win_lp: Log-probs of "observed" winning responses (may be adversarially flipped)
+        observed_lose_lp: Log-probs of "observed" losing responses (may be adversarially flipped)
+        margin: Target margin reduction (smaller = stronger unlearning)
+    
+    Returns:
+        Mean hinge loss for unlearning
+    """
+    # Penalize when observed winner has higher probability than observed loser
+    # The margin parameter controls how aggressively we unlearn
     return torch.relu(margin + observed_win_lp - observed_lose_lp).mean()
+
+def ihl_squared_loss(observed_win_lp, observed_lose_lp):
+    """
+    Alternative IHL variant using squared loss instead of hinge.
+    Provides smoother gradients for unlearning.
+    
+    Formula: L_IHL_sq = (log P(y_win|x) - log P(y_lose|x))^2
+    """
+    diff = observed_win_lp - observed_lose_lp
+    return (diff ** 2).mean()
+
+def ihl_reverse_ranking(observed_win_lp, observed_lose_lp, temperature: float = 1.0):
+    """
+    Reverse ranking loss: actively encourages swapping the preference order.
+    More aggressive unlearning by explicitly trying to reverse the corrupted signal.
+    
+    Formula: L_reverse = log(1 + exp(-temperature * (log P(y_lose|x) - log P(y_win|x))))
+    
+    This makes the model prefer the "observed loser" over "observed winner",
+    effectively reversing the adversarial flip.
+    """
+    # Encourage y_lose to have higher prob than y_win (reverse the corruption)
+    logit = temperature * (observed_lose_lp - observed_win_lp)
+    return F.softplus(-logit).mean()
+
+def adaptive_ihl_weight(margin, min_weight=0.1, max_weight=1.0, threshold=0.5):
+    """
+    Adaptive weighting for IHL based on corruption confidence.
+    
+    Samples with smaller margins (more uncertain) get higher unlearning weight,
+    as they are more likely to be adversarially corrupted.
+    
+    Args:
+        margin: Absolute margin |log P(chosen) - log P(rejected)|
+        min_weight: Minimum weight for high-margin (confident) samples
+        max_weight: Maximum weight for low-margin (uncertain) samples  
+        threshold: Margin threshold for full weight
+    """
+    # Sigmoid-based smooth transition
+    normalized_margin = margin / threshold
+    weight = min_weight + (max_weight - min_weight) * torch.sigmoid(-5 * (normalized_margin - 1))
+    return weight
 
 # ---------- Adversary & filter ----------
 def flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, flip_rate: float):
+    """
+    Adversarial label flipping strategy: targets uncertain examples.
+    
+    Simulates an adversary that flips preference labels for examples where the model
+    is most uncertain (smallest margin between chosen and rejected). This is a realistic
+    attack as uncertain examples are where flipping has maximum impact on learning.
+    
+    Args:
+        lp_c_pi: Log-probs of chosen responses under current policy
+        lp_r_pi: Log-probs of rejected responses under current policy
+        flip_rate: Fraction of batch to flip (0.0 = no flips, 1.0 = flip all)
+    
+    Returns:
+        Boolean mask: True = flip this example (treat rejected as winner)
+    """
     # Flip labels for a fraction with smallest |margin|
     margins = (lp_c_pi - lp_r_pi).abs()
     B = margins.shape[0]
@@ -239,11 +402,76 @@ def flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, flip_rate: float):
         flip[idx] = True
     return flip  # True = flip (i.e., treat 'neg' as observed winner)
 
+def flip_labels_random(lp_c_pi, lp_r_pi, flip_rate: float):
+    """
+    Random label flipping strategy for comparison.
+    
+    Randomly flips a fraction of labels without targeting specific examples.
+    Useful as a baseline to compare against uncertainty-targeted attacks.
+    """
+    B = lp_c_pi.shape[0]
+    k = int(flip_rate * B)
+    flip = torch.zeros(B, dtype=torch.bool, device=lp_c_pi.device)
+    if k > 0:
+        idx = torch.randperm(B, device=lp_c_pi.device)[:k]
+        flip[idx] = True
+    return flip
+
+def flip_labels_confidence_targeting(lp_c_pi, lp_r_pi, flip_rate: float):
+    """
+    Adversarial strategy: targets most confident examples.
+    
+    Flips labels where model is most confident (largest margin). This can be
+    particularly damaging as it corrupts the "anchor" examples the model relies on.
+    """
+    margins = (lp_c_pi - lp_r_pi).abs()
+    B = margins.shape[0]
+    k = int(flip_rate * B)
+    flip = torch.zeros(B, dtype=torch.bool, device=margins.device)
+    if k > 0:
+        idx = torch.argsort(margins, descending=True)[:k]  # Largest margins
+        flip[idx] = True
+    return flip
+
 def filter_by_margin(lp_c_pi, lp_r_pi, tau: float):
+    """
+    Partition examples into clean vs. corrupt based on margin threshold.
+    
+    Heuristic: Examples with small margins |log P(chosen) - log P(rejected)| < tau
+    are likely to be adversarially corrupted or noisy, as correctly labeled preferences
+    should show clear differentiation.
+    
+    Args:
+        lp_c_pi: Log-probs of chosen responses
+        lp_r_pi: Log-probs of rejected responses  
+        tau: Margin threshold (lower = stricter filtering)
+    
+    Returns:
+        clean_mask: Boolean mask for likely clean examples
+        corrupt_mask: Boolean mask for likely corrupted examples
+        margin: Computed margins for all examples
+    """
     margin = (lp_c_pi - lp_r_pi).abs()
     corrupt = margin < tau
     clean = ~corrupt
     return clean, corrupt, margin
+
+def filter_by_agreement(lp_c_pi, lp_r_pi, lp_c_ref, lp_r_ref):
+    """
+    Alternative filtering: detect examples where policy and reference disagree.
+    
+    If policy prefers different response than reference model, this may indicate
+    adversarial corruption has affected the policy.
+    
+    Returns:
+        agree_mask: Policy and reference agree on preference
+        disagree_mask: Policy and reference disagree
+    """
+    policy_prefers_chosen = lp_c_pi > lp_r_pi
+    ref_prefers_chosen = lp_c_ref > lp_r_ref
+    agree = policy_prefers_chosen == ref_prefers_chosen
+    disagree = ~agree
+    return agree, disagree
 
 # ---------- Training ----------
 def main():
@@ -256,17 +484,72 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--eta", type=float, default=0.1)
-    ap.add_argument("--ihl-weight", type=float, default=0.0)
-    ap.add_argument("--ihl-margin", type=float, default=0.5)
-    ap.add_argument("--flip-rate", type=float, default=0.0)
-    ap.add_argument("--filter-tau", type=float, default=0.5)
+    
+    # IHL (Inverse Hinge Loss) unlearning parameters
+    ap.add_argument("--ihl-weight", type=float, default=0.0,
+                    help="Weight for IHL unlearning loss (0.0 = disabled, higher = stronger unlearning)")
+    ap.add_argument("--ihl-margin", type=float, default=0.5,
+                    help="Target margin for IHL hinge loss (smaller = more aggressive unlearning)")
+    ap.add_argument("--ihl-type", type=str, default="hinge", choices=["hinge", "squared", "reverse"],
+                    help="Type of IHL loss: hinge (default), squared (smoother), or reverse (aggressive)")
+    ap.add_argument("--ihl-adaptive", action="store_true",
+                    help="Use adaptive IHL weighting based on margin (prioritize uncertain examples)")
+    ap.add_argument("--ihl-reverse-temp", type=float, default=1.0,
+                    help="Temperature for reverse ranking IHL (only used with --ihl-type=reverse)")
+    
+    # Adversary simulation parameters
+    ap.add_argument("--flip-rate", type=float, default=0.0,
+                    help="Fraction of labels to flip adversarially (0.0-1.0)")
+    ap.add_argument("--flip-strategy", type=str, default="uncertainty", 
+                    choices=["uncertainty", "random", "confidence"],
+                    help="Adversary strategy: uncertainty (target ambiguous), random, or confidence (target certain)")
+    
+    # Filtering and robustness parameters
+    ap.add_argument("--filter-tau", type=float, default=0.5,
+                    help="Margin threshold for filtering corrupt samples (lower = stricter)")
+    ap.add_argument("--use-agreement-filter", action="store_true",
+                    help="Also filter based on policy-reference disagreement")
     ap.add_argument("--adv-dpo-weight", type=float, default=0.5,
                 help="Relative weight for adversarial/corrupt pairs in DPO (1.0 = equal).")
+    
+    # General training parameters
     ap.add_argument("--save-dir", type=str, default="runs/phi2_dpo")
     args = ap.parse_args()
 
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Print training configuration
+    print("=" * 80)
+    print("ADVERSARIAL RLHF WITH IHL UNLEARNING - Training Configuration")
+    print("=" * 80)
+    print(f"Device: {device}")
+    print(f"Training data: {args.train}")
+    print(f"Epochs: {args.epochs} | Batch size: {args.bsz} | Grad accumulation: {args.grad_accum}")
+    print(f"Learning rate: {args.lr} | Max length: {args.max_len}")
+    print(f"Seed: {args.seed}")
+    print("\n--- DPO Parameters ---")
+    print(f"Beta (eta): {args.eta}")
+    print(f"Adversarial weight in DPO: {args.adv_dpo_weight}")
+    print("\n--- Adversary Simulation ---")
+    print(f"Flip rate: {args.flip_rate} ({args.flip_rate*100:.1f}% of samples)")
+    print(f"Flip strategy: {args.flip_strategy}")
+    print("\n--- IHL Unlearning ---")
+    if args.ihl_weight > 0.0:
+        print(f"IHL enabled: YES")
+        print(f"  IHL weight: {args.ihl_weight}")
+        print(f"  IHL type: {args.ihl_type}")
+        print(f"  IHL margin: {args.ihl_margin}")
+        print(f"  Adaptive weighting: {args.ihl_adaptive}")
+        if args.ihl_type == "reverse":
+            print(f"  Reverse temperature: {args.ihl_reverse_temp}")
+    else:
+        print(f"IHL enabled: NO (--ihl-weight is 0)")
+    print("\n--- Corruption Detection ---")
+    print(f"Margin threshold (tau): {args.filter_tau}")
+    print(f"Agreement filter: {args.use_agreement_filter}")
+    print(f"\nSave directory: {args.save_dir}")
+    print("=" * 80 + "\n")
 
     model_id = "microsoft/phi-2"
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
@@ -360,9 +643,16 @@ def main():
                     lp_c_ref = seq_logprobs(ref_model, c_ids, c_attn, c_mask, requires_grad=False)
                     lp_r_ref = seq_logprobs(ref_model, r_ids, r_attn, r_mask, requires_grad=False)
             
-            # Simulated adversary: choose flips
+            # Simulated adversary: choose flips based on strategy
             with torch.no_grad():
-                flip_mask = flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, args.flip_rate)
+                if args.flip_strategy == "uncertainty":
+                    flip_mask = flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, args.flip_rate)
+                elif args.flip_strategy == "random":
+                    flip_mask = flip_labels_random(lp_c_pi, lp_r_pi, args.flip_rate)
+                elif args.flip_strategy == "confidence":
+                    flip_mask = flip_labels_confidence_targeting(lp_c_pi, lp_r_pi, args.flip_rate)
+                else:
+                    flip_mask = flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, args.flip_rate)
 
             # Use automatic mixed precision if available
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
@@ -372,9 +662,16 @@ def main():
                 obs_win_ref  = torch.where(flip_mask, lp_r_ref, lp_c_ref)
                 obs_lose_ref = torch.where(flip_mask, lp_c_ref, lp_r_ref)
 
-                # Margin-based partition
+                # Margin-based partition for corruption detection
                 with torch.no_grad():
                     clean_mask, corrupt_mask, margin = filter_by_margin(lp_c_pi, lp_r_pi, args.filter_tau)
+                    
+                    # Optional: also use agreement-based filtering
+                    if args.use_agreement_filter:
+                        agree_mask, disagree_mask = filter_by_agreement(lp_c_pi, lp_r_pi, lp_c_ref, lp_r_ref)
+                        # Samples are "corrupt" if they have low margin OR policy/ref disagree
+                        corrupt_mask = corrupt_mask | disagree_mask
+                        clean_mask = ~corrupt_mask
 
                 # Per-sample weights (down-weight adversarial/corrupt if desired)
                 w = torch.ones_like(obs_win_pi)
@@ -388,16 +685,43 @@ def main():
                     weight=w
                 )
 
-                # Optional IHL on adversarial subset
+                # IHL (Inverse Hinge Loss) for unlearning adversarial corruption
+                # Applied to detected corrupt/adversarial subset
                 if args.ihl_weight > 0.0 and corrupt_mask.any():
-                    loss_ihl = ihl_hinge_text(
-                        obs_win_pi[corrupt_mask],
-                        obs_lose_pi[corrupt_mask],
-                        margin=args.ihl_margin
-                    )
+                    corrupt_win_lp = obs_win_pi[corrupt_mask]
+                    corrupt_lose_lp = obs_lose_pi[corrupt_mask]
+                    
+                    # Select IHL loss type
+                    if args.ihl_type == "hinge":
+                        loss_ihl = ihl_hinge_text(corrupt_win_lp, corrupt_lose_lp, margin=args.ihl_margin)
+                    elif args.ihl_type == "squared":
+                        loss_ihl = ihl_squared_loss(corrupt_win_lp, corrupt_lose_lp)
+                    elif args.ihl_type == "reverse":
+                        loss_ihl = ihl_reverse_ranking(corrupt_win_lp, corrupt_lose_lp, 
+                                                       temperature=args.ihl_reverse_temp)
+                    else:
+                        loss_ihl = ihl_hinge_text(corrupt_win_lp, corrupt_lose_lp, margin=args.ihl_margin)
+                    
+                    # Apply adaptive weighting if enabled
+                    if args.ihl_adaptive:
+                        corrupt_margins = margin[corrupt_mask]
+                        adaptive_weights = adaptive_ihl_weight(corrupt_margins, 
+                                                               min_weight=0.1, 
+                                                               max_weight=1.0, 
+                                                               threshold=args.filter_tau)
+                        # Re-compute IHL with adaptive weights (element-wise multiplication)
+                        if args.ihl_type == "hinge":
+                            per_sample_loss = torch.relu(args.ihl_margin + corrupt_win_lp - corrupt_lose_lp)
+                        elif args.ihl_type == "squared":
+                            per_sample_loss = (corrupt_win_lp - corrupt_lose_lp) ** 2
+                        elif args.ihl_type == "reverse":
+                            logit = args.ihl_reverse_temp * (corrupt_lose_lp - corrupt_win_lp)
+                            per_sample_loss = F.softplus(-logit)
+                        loss_ihl = (per_sample_loss * adaptive_weights).mean()
                 else:
                     loss_ihl = torch.tensor(0.0, device=device, dtype=lp_c_pi.dtype)
 
+                # Combined loss: DPO (on all) + IHL (on corrupt subset for unlearning)
                 loss = loss_dpo + args.ihl_weight * loss_ihl
 
                 # Scale loss by gradient accumulation steps
@@ -426,17 +750,57 @@ def main():
                 with torch.no_grad():
                     # Compute metrics efficiently
                     margin_diff = lp_c_pi - lp_r_pi
+                    
+                    # Basic metrics
                     m = {
                         "step": step,
+                        "epoch": epoch + 1,
                         "loss": float(loss.item() * args.grad_accum),  # Unscale for logging
                         "loss_dpo": float(loss_dpo.item()),
                         "loss_ihl": float(loss_ihl.item()),
+                        
+                        # Margin statistics
                         "margin_mean": float(margin_diff.mean().item()),
                         "margin_abs_mean": float(margin_diff.abs().mean().item()),
+                        "margin_std": float(margin_diff.std().item()),
+                        
+                        # Adversary & corruption detection metrics
                         "flip_frac": float(flip_mask.float().mean().item()),
+                        "flip_count": int(flip_mask.sum().item()),
                         "clean_frac": float(clean_mask.float().mean().item()),
-                        "corrupt_frac": float(corrupt_mask.float().mean().item())
+                        "corrupt_frac": float(corrupt_mask.float().mean().item()),
+                        
+                        # Accuracy metrics (how well does model distinguish chosen vs rejected)
+                        "policy_accuracy": float((lp_c_pi > lp_r_pi).float().mean().item()),
+                        "ref_accuracy": float((lp_c_ref > lp_r_ref).float().mean().item()),
                     }
+                    
+                    # IHL-specific metrics when unlearning is active
+                    if args.ihl_weight > 0.0 and corrupt_mask.any():
+                        corrupt_margins = margin[corrupt_mask]
+                        m.update({
+                            "ihl_corrupt_margin_mean": float(corrupt_margins.mean().item()),
+                            "ihl_corrupt_margin_std": float(corrupt_margins.std().item()),
+                            "ihl_unlearn_strength": float(args.ihl_weight),
+                        })
+                    
+                    # Agreement-based filtering metrics
+                    if args.use_agreement_filter:
+                        agree_mask, disagree_mask = filter_by_agreement(lp_c_pi, lp_r_pi, lp_c_ref, lp_r_ref)
+                        m.update({
+                            "policy_ref_agreement": float(agree_mask.float().mean().item()),
+                            "policy_ref_disagreement": float(disagree_mask.float().mean().item()),
+                        })
+                    
+                    # Log KL divergence from reference (measure of policy drift)
+                    kl_c = (lp_c_pi - lp_c_ref).mean()
+                    kl_r = (lp_r_pi - lp_r_ref).mean()
+                    m.update({
+                        "kl_chosen": float(kl_c.item()),
+                        "kl_rejected": float(kl_r.item()),
+                        "kl_total": float((kl_c + kl_r).item() / 2),
+                    })
+                    
                 print(json.dumps(m))
         
         # Clear CUDA cache at the end of each epoch to reduce memory fragmentation
