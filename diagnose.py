@@ -3,7 +3,8 @@ from configs import Config
 from models import Policy, RewardOracle
 from data import sample_batch
 from adversary import flip_labels_uncertainty_targeting
-from losses import dpo_loss, ihl_logit_hinge  # <-- use logit hinge
+from losses import dpo_loss, ihl_logit_hinge
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def bt_preference(rw, rl):
     return torch.sigmoid(rw - rl)
@@ -107,6 +108,14 @@ def main():
     torch.manual_seed(cfg.seed)
 
     policy = Policy(cfg.obs_dim, cfg.num_actions).to(device)
+
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct")
+    policy = AutoModelForCausalLM.from_pretrained(
+        "mistralai/Mistral-7B-Instruct",
+        load_in_4bit=True,  # <= allows single GPU
+        device_map="auto"
+    )
+
     pi0 = Policy(cfg.obs_dim, cfg.num_actions).to(device)
     pi0.load_state_dict(policy.state_dict())
     for p in pi0.parameters(): p.requires_grad = False

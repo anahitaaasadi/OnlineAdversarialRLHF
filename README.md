@@ -1,32 +1,32 @@
 
-# Online RLHF with Adversarial Feedback (Toy Simulator)
+# Phi-2 RLHF (DPO + optional IHL) — Minimal Trainer
 
-This is a **minimal, runnable** PyTorch project that implements:
+Train **microsoft/phi-2** with **DPO** on pairwise preferences, with optional:
+- **Uncertainty-targeted adversarial flips** (simulated)
+- **Filtering** by small policy margin
+- **IHL (logit hinge)** unlearning on flagged-corrupt pairs
+- **PEFT QLoRA** so it runs on a single GPU (<=12–16GB)
 
-- Online preference data stream (Bradley–Terry ground-truth reward)
-- **Uncertainty-targeting adversary** that flips labels at small margins
-- **Filter** that flags likely-corrupted pairs using predicted margin/uncertainty
-- **Hybrid update**:
-  - **DPO loss** on predicted-clean pairs
-  - **IHL (Inverted Hinge Loss)** unlearning on predicted-corrupt winners
-- **Retroactive unlearning** pass over the history of flagged-corrupt samples
-
-It’s a pedagogical scaffold to plug in your real model, prompts, and responses.
+## Data format (JSONL)
+Each line:
+```json
+{"prompt": "...", "pos": "preferred response", "neg": "rejected response"}
+```
+Put your file at `data/train.jsonl`.
 
 ## Quickstart
-
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python main.py --steps 1000 --batch-size 256 --flip-rate 0.2 --ihl-weight 0.5
+
+# Example run (no adversary, pure DPO):
+python train_phi2_dpo.py --train data/train.jsonl --epochs 1 --lr 1e-4 --eta 0.1 --ihl-weight 0.0
+
+# With adversary and filtering + small IHL:
+python train_phi2_dpo.py --train data/train.jsonl --epochs 1 --lr 1e-4 --eta 0.1 \
+  --flip-rate 0.3 --filter-tau 0.5 --ihl-weight 0.1 --save-dir runs/phi2_dpo
 ```
 
-Key flags:
-- `--flip-rate`: adversary's expected fraction of pairs it flips each round.
-- `--ihl-weight`: weight for IHL unlearning loss.
-- `--retro-K`: run retroactive unlearning every K steps (0 disables).
-
-Outputs:
-- Console logs with online metrics (clean AUROC proxy, policy reward, corruption rate).
-- A `.jsonl` log under `runs/`.
-# OnlineAdversarialRLHF
+## Outputs
+- Console metrics each step: DPO loss, IHL, margin stats.
+- Saved adapter at `runs/.../adapter`. Load with PEFT on top of Phi-2.

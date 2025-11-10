@@ -1,4 +1,8 @@
 
 torch>=2.1
-numpy>=1.24
+transformers>=4.41.0
+accelerate>=0.31.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+datasets>=2.19.0
 tqdm>=4.66
