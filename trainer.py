@@ -1,4 +1,3 @@
-
 from dataclasses import asdict
 import torch, json, os
 from tqdm import trange
@@ -8,7 +7,7 @@ from models import Policy, RewardOracle
 from data import sample_batch
 from adversary import flip_labels_uncertainty_targeting
 from filtering import flag_corruption_by_policy_margin
-from losses import dpo_loss, ihl_loss
+from losses import dpo_loss, ihl_logit_hinge  # <-- using logit hinge
 
 def bt_preference(reward_w, reward_l):
     # Bradley–Terry preference probability for y=1 (a_w preferred)
@@ -52,7 +51,9 @@ def run(cfg: Config):
         # Compute policy logits and filter
         pi_logits = policy(x)             # [B, A]
         pi0_logits = pi0(x)
-        clean_mask, corrupt_mask, pol_margins = flag_corruption_by_policy_margin(pi_logits, a_w, a_l, cfg.filter_tau)
+        clean_mask, corrupt_mask, pol_margins = flag_corruption_by_policy_margin(
+            pi_logits, a_w, a_l, cfg.filter_tau
+        )
 
         # Split pairs for losses
         clean_idx = clean_mask.nonzero(as_tuple=False).squeeze(1)
@@ -64,7 +65,6 @@ def run(cfg: Config):
         a_l_obs = torch.where(y_tilde==1, a_l, a_w)
 
         opt.zero_grad()
-
         loss = torch.tensor(0.0, device=device)
 
         # DPO on clean
@@ -77,23 +77,24 @@ def run(cfg: Config):
 
         # IHL on corrupt: demote the observed "winner" (likely corrupted) a_w_obs
         if corrupt_idx.numel() > 0 and cfg.ihl_weight > 0:
-            pi_probs = torch.softmax(pi_logits[corrupt_idx], dim=-1)
-            ihl = ihl_loss(pi_probs, a_w_obs[corrupt_idx])
+            ihl = ihl_logit_hinge(pi_logits[corrupt_idx], a_w_obs[corrupt_idx], margin=1.0)
             loss = loss + cfg.ihl_weight * ihl
 
             # Save for retroactive unlearning: (x, winner)
-            history_corrupt.append((x[corrupt_idx].detach().cpu(), a_w_obs[corrupt_idx].detach().cpu()))
+            history_corrupt.append(
+                (x[corrupt_idx].detach().cpu(), a_w_obs[corrupt_idx].detach().cpu())
+            )
 
         loss.backward()
         opt.step()
 
-        # Retroactive unlearning pass
+        # Retroactive unlearning pass (logit hinge, not probs)
         if cfg.retro_K > 0 and (t+1) % cfg.retro_K == 0 and len(history_corrupt) > 0:
             for _ in range(cfg.retro_passes):
                 Xr = torch.cat([p[0] for p in history_corrupt], dim=0).to(device)
                 Ar = torch.cat([p[1] for p in history_corrupt], dim=0).to(device)
-                pr = torch.softmax(policy(Xr), dim=-1)
-                ihl_r = ihl_loss(pr, Ar)
+                logits_r = policy(Xr)
+                ihl_r = ihl_logit_hinge(logits_r, Ar, margin=1.0)
                 opt.zero_grad()
                 (cfg.ihl_weight * ihl_r).backward()
                 opt.step()
