@@ -1,38 +1,310 @@
-# ---------- Losses ----------
+import os
+from dataclasses import dataclass, field
+from typing import Optional
 
-import torch
-from torch import nn
-from torch import Tensor, tensor
-from transformers import Trainer
-import torch.nn.functional as F
-import copy, os
-import deepspeed
-from evaluate_util import get_dataloader, get_all_evals
-import copy
-import json 
-from pathlib import Path
-from data_module import get_batch_loss 
-from utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
 import numpy as np
-from scipy.stats import ks_2samp, hmean
-import csv 
-from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
-
-def printll(name, inp):
-    #print list with 4 decimal for each item
-    print(name, [round(x, 4) for x in inp])
-
-from torchmetrics.classification import MulticlassHingeLoss
-from torchmetrics.utilities.data import to_onehot
-from torchmetrics.metric import Metric
-from torchmetrics.functional.classification.confusion_matrix import _multiclass_confusion_matrix_format
-from torchmetrics.functional.classification.hinge import (
-    _multiclass_hinge_loss_arg_validation, 
-    _multiclass_hinge_loss_tensor_validation,
-    _hinge_loss_compute
+import torch
+from datasets import Dataset, load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+)
+from alignment import H4ArgumentParser
+from trl import (
+    DPOConfig,
+    DPOTrainer,
+    ModelConfig,
 )
 
+from trl.commands.cli_utils import TrlParser
+from dpo import MyDPOTrainer
 
+@dataclass
+class ScriptArguments:
+    """
+    The arguments for the DPO training script.
+    """
+
+    # data parameters, i.e., the KL penalty in the paper
+    #beta: Optional[float] = field(default=0.1, metadata={"help": "the beta parameter for DPO loss"})
+
+    # training parameters
+    # model_name_or_path: Optional[str] = field(
+    #     default="HuggingFaceH4/mistral-7b-sft-beta",
+    #     metadata={"help": "the location of the model name or path"},
+    # )
+    ref_model: Optional[str] = field(
+        default="",
+        metadata={"help": "the location of the SFT model name or path"},
+    )
+    train_dir: Optional[str] = field(
+        default="./data/uf_split0_responses_K8_reward.json",
+        metadata={"help": "the location of the dataset name or path"},
+    )
+    eval_dir: Optional[str] = field(
+        default="/export/home/hanze/project/vllm-gen/uf_split0_offline_reward.json",  # "/export/home/data/gemma_it_2b_3w_k8_with_pairrm_rewards.json",
+        metadata={"help": "the location of the evalset name or path"},
+    )
+    # learning_rate: Optional[float] = field(default=5e-7, metadata={"help": "optimizer learning rate"})
+    # lr_scheduler_type: Optional[str] = field(
+    #     default="constant_with_warmup", metadata={"help": "the lr scheduler type"}
+    # )
+    # warmup_steps: Optional[int] = field(default=100, metadata={"help": "the number of warmup steps"})
+    # weight_decay: Optional[float] = field(default=0.01, metadata={"help": "the weight decay"})
+    # optimizer_type: Optional[str] = field(default="paged_adamw_32bit", metadata={"help": "the optimizer type"})
+
+    # per_device_train_batch_size: Optional[int] = field(default=1, metadata={"help": "train batch size per device"})
+    # per_device_eval_batch_size: Optional[int] = field(default=1, metadata={"help": "eval batch size per device"})
+    # gradient_accumulation_steps: Optional[int] = field(
+    #     default=16, metadata={"help": "the number of gradient accumulation steps"}
+    # )
+    # gradient_checkpointing: Optional[bool] = field(
+    #     default=True, metadata={"help": "whether to use gradient checkpointing"}
+    # )
+
+    eos_padding: Optional[bool] = field(default=True, metadata={"help": "whether to pad with eos token"})
+    # lora_alpha: Optional[float] = field(default=16, metadata={"help": "the lora alpha parameter"})
+    # lora_dropout: Optional[float] = field(default=0.05, metadata={"help": "the lora dropout parameter"})
+    # lora_r: Optional[int] = field(default=8, metadata={"help": "the lora r parameter"})
+
+    margin_scale: Optional[float] = field(default=1.0, metadata={"help": "the margin scale"})
+
+    # max_prompt_length: Optional[int] = field(default=1000, metadata={"help": "the maximum prompt length"})
+    # max_length: Optional[int] = field(default=2048, metadata={"help": "the maximum sequence length"})
+    # max_steps: Optional[int] = field(default=20, metadata={"help": "max number of training steps"})
+    # num_train_epochs: Optional[int] = field(default=2, metadata={"help": "max number of training epochs"})
+    # logging_steps: Optional[int] = field(default=2, metadata={"help": "the logging frequency"})
+    # save_strategy: Optional[str] = field(default="epoch", metadata={"help": "the saving strategy"})
+    # save_steps: Optional[int] = field(default=50000, metadata={"help": "the saving frequency"})
+    # eval_steps: Optional[int] = field(default=100, metadata={"help": "the evaluation frequency"})
+    # run_name: Optional[str] = field(default="dpo_soft", metadata={"help": "the run name"})
+    # loss_type: Optional[str] = field(default="sigmoid", metadata={"help": "the loss type"})
+    # output_dir: Optional[str] = field(default="./dpo_soft", metadata={"help": "the output directory"})
+    # log_freq: Optional[int] = field(default=1, metadata={"help": "the logging frequency"})
+
+    # instrumentation
+    sanity_check: Optional[bool] = field(default=False, metadata={"help": "only train on 1000 samples"})
+
+    max_training_samples: Optional[int] = field(default=-1, metadata={"help": "the maximum sample size"})
+
+    choose_type: Optional[str] = field(default="max_random", metadata={"help": "the choose type"})
+
+    # report_to: Optional[str] = field(
+    #     default="wandb",
+    #     metadata={
+    #         "help": 'The list of integrations to report the results and logs to. Supported platforms are `"azure_ml"`,'
+    #         '`"comet_ml"`, `"mlflow"`, `"neptune"`, `"tensorboard"`,`"clearml"` and `"wandb"`. '
+    #         'Use `"all"` to report to all integrations installed, `"none"` for no integrations.'
+    #     },
+    # )
+    # # debug argument for distributed training
+    ignore_bias_buffers: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "fix for DDP issues with LM bias/mask buffers - invalid scalar type,`inplace operation. See"
+            "https://github.com/huggingface/transformers/issues/22482#issuecomment-1595790992"
+        },
+    )
+    eot_token: Optional[str] = field(default="", metadata={"help": "the end of text token"})
+    #mask_prompt: Optional[bool] = field(default=False, metadata={"help": "mask prompt"})
+    len_penalty: Optional[float] = field(default=0, metadata={"help": "the length penalty"})
+
+
+def prepare_data(
+    data_dir: str = "/home/xiongwei/data/helpful/rm/rm1003.jsonl",
+    sanity_check: bool = False,
+    cache_dir: str = None,
+    num_proc=24,
+    margin_scale=1,
+    choose_type="random",
+    eot_token="",
+    length_penalty=0,
+) -> Dataset:
+    """Prepare the dataset for DPO training by rejection sampling.
+    We implement different strategies to select pairs, including
+    max_min: best v.s. worst
+    max_random: best v.s. random from the remaining;
+    max_max: best v.s. second best
+    max_min_p: best v.s. worst but we additionally add a length penalty in the reward value
+    """
+    ds = load_dataset("json", data_files=data_dir, split="train")
+    print(ds)
+
+    pos = []
+    neg = []
+    prompts = []
+
+    margin = []
+    for sample in ds:
+        P = tokenizer.apply_chat_template(sample["prompt"], tokenize = False, add_generation_prompt= True)
+        if choose_type == "random":
+            idx0 = 0
+            idx1 = 1
+        elif choose_type == "max_random":
+            idx0 = np.argmax(sample["rewards"])
+            if idx0 == 0:
+                idx1 = 1
+            else:
+                idx1 = 0
+        elif choose_type == "max_min":
+            idx0 = np.argmax(sample["rewards"])
+            idx1 = np.argmin(sample["rewards"])
+        elif choose_type == "max_max":
+            sorted_indices = np.argsort(sample["rewards"])
+            idx0 = sorted_indices[-1]
+            idx1 = sorted_indices[-2]
+        elif choose_type == "max_min_p":
+            r = [
+                sample["rewards"][i] - length_penalty * len(sample["responses"][i])
+                for i in range(len(sample["rewards"]))
+            ]
+            idx0 = np.argmax(r)
+            idx1 = np.argmin(r)
+        else:
+            raise NotImplementedError
+
+        if type(idx0) == np.ndarray or type(idx0) == list:
+            assert len(idx0) == len(idx1)
+            for i in range(len(idx0)):
+                prompts.append(P)
+                pos.append(sample["responses"][idx0[i]] + eot_token)
+                neg.append(sample["responses"][idx1[i]] + eot_token)
+                margin.append((sample["rewards"][idx0[i]] - sample["rewards"][idx1[i]]) * margin_scale)
+        else:
+            if sample["rewards"][idx0] > sample["rewards"][idx1]:
+                prompts.append(P)
+                pos.append(sample["responses"][idx0] + eot_token)
+                neg.append(sample["responses"][idx1] + eot_token)
+                margin.append((sample["rewards"][idx0] - sample["rewards"][idx1]) * margin_scale)
+            elif sample["rewards"][idx0] < sample["rewards"][idx1]:
+                prompts.append(P)
+                pos.append(sample["responses"][idx1] + eot_token)
+                neg.append(sample["responses"][idx0] + eot_token)
+                margin.append((-sample["rewards"][idx0] + sample["rewards"][idx1]) * margin_scale)
+    dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
+
+    if sanity_check:
+        dataset = dataset.select(range(min(len(dataset), 100)))
+
+    return dataset
+
+
+if __name__ == "__main__":
+
+    
+    parser = H4ArgumentParser((ScriptArguments, DPOConfig, ModelConfig))
+    script_args, training_args, model_config = parser.parse()
+
+    # 1. load a pretrained model
+    model = AutoModelForCausalLM.from_pretrained(
+        model_config.model_name_or_path,
+        attn_implementation="flash_attention_2",
+        torch_dtype=torch.float16,
+    )
+    model.config.use_cache = False
+
+    if script_args.ignore_bias_buffers:
+        # torch distributed hack
+        model._ddp_params_and_buffers_to_ignore = [
+            name for name, buffer in model.named_buffers() if buffer.dtype == torch.bool
+        ]
+
+    if script_args.ref_model:
+        ref_name = script_args.ref_model
+    else:
+        ref_name = model_config.model_name_or_path
+
+    model_ref = AutoModelForCausalLM.from_pretrained(
+        ref_name,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
+    if script_args.eos_padding:
+        tokenizer.pad_token = tokenizer.eos_token
+    else:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        model.config.vocab_size += 1
+        model_ref.config.vocab_size += 1
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model_ref.config.pad_token_id = tokenizer.pad_token_id
+        model.resize_token_embeddings(len(tokenizer))
+        model_ref.resize_token_embeddings(len(tokenizer))
+
+
+    # 2. Load the Stack-exchange paired dataset
+    train_dataset = prepare_data(
+        data_dir=script_args.train_dir,
+        margin_scale=script_args.margin_scale,
+        sanity_check=script_args.sanity_check,
+        choose_type=script_args.choose_type,
+        eot_token=script_args.eot_token,
+        length_penalty=script_args.len_penalty,
+    )
+
+    if script_args.max_training_samples > 0:
+        train_dataset = train_dataset.select(range(script_args.max_training_samples))
+
+    # 3. Load evaluation dataset
+    eval_dataset = prepare_data(
+        data_dir=script_args.eval_dir,
+        sanity_check=True,
+        margin_scale=script_args.margin_scale,
+        eot_token=script_args.eot_token,
+    )
+
+    # 4. initialize training arguments:
+
+    # training_args = TrainingArguments(
+    #     per_device_train_batch_size=script_args.per_device_train_batch_size,
+    #     per_device_eval_batch_size=script_args.per_device_eval_batch_size,
+    #     # max_steps=script_args.max_steps,
+    #     num_train_epochs=script_args.num_train_epochs,
+    #     save_strategy=script_args.save_strategy,
+    #     logging_steps=script_args.logging_steps,
+    #     save_steps=script_args.save_steps,
+    #     gradient_accumulation_steps=script_args.gradient_accumulation_steps,
+    #     gradient_checkpointing=script_args.gradient_checkpointing,
+    #     learning_rate=script_args.learning_rate,
+    #     evaluation_strategy="steps",
+    #     eval_steps=script_args.eval_steps,
+    #     output_dir=script_args.output_dir,
+    #     # report_to=script_args.report_to,
+    #     lr_scheduler_type=script_args.lr_scheduler_type,
+    #     warmup_steps=script_args.warmup_steps,
+    #     # optim=script_args.optimizer_type,
+    #     bf16=True,
+    #     remove_unused_columns=False,
+    #     run_name=script_args.run_name,
+    # )
+    print(training_args)
+
+    # 5. initialize the DPO trainer
+
+    dpo_trainer = MyDPOTrainer(
+        model,
+        model_ref,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        beta=training_args.beta,
+        tokenizer=tokenizer,
+        max_length=training_args.max_length,
+        max_prompt_length=training_args.max_prompt_length,
+        loss_type=training_args.loss_type,
+    )
+    print("begin to train")
+
+    # 6. train
+    dpo_trainer.train()
+    dpo_trainer.save_model(training_args.output_dir)
+
+    # 7. save
+    output_dir = os.path.join(training_args.output_dir, "final_checkpoint")
+    dpo_trainer.model.save_pretrained(output_dir)
+    
+    
+    
 import inspect
 import random
 import warnings
@@ -579,484 +851,3 @@ class MyDPOTrainer(DPOTrainer):
         labels = torch.zeros(logits.shape[0], device=self.accelerator.device)
 
         return (loss.detach(), logits, labels)
-
-
-def _custom_multiclass_hinge_loss_update(
-    preds,
-    target,
-    alpha,
-    squared,
-    multiclass_mode = "crammer-singer"
-):
-    if not torch.all((preds >= 0) * (preds <= 1)):
-        preds = preds.softmax(1)
-
-    target = to_onehot(target, max(2, preds.shape[1])).bool()
-    if multiclass_mode == "crammer-singer":
-        margin = preds[target]
-        margin -= torch.max(preds[~target].view(preds.shape[0], -1), dim=1)[0]
-    else:
-        target = target.bool()
-        margin = torch.zeros_like(preds)
-        margin[target] = preds[target]
-        margin[~target] = -preds[~target]
-
-    measures = alpha + margin
-    measures = torch.clamp(measures, 0)
-
-    if squared:
-        measures = measures.pow(2)
-
-    total = tensor(target.shape[0], device=target.device)
-    return measures.sum(dim=0), total
-
-def multiclass_hinge_loss(
-    preds,
-    target,
-    num_classes,
-    alpha = 1.0,
-    squared = False,
-    multiclass_mode = "crammer-singer",
-    ignore_index = None,
-    validate_args = True,
-):
-    if validate_args:
-        _multiclass_hinge_loss_arg_validation(num_classes, squared, multiclass_mode, ignore_index)
-        _multiclass_hinge_loss_tensor_validation(preds, target, num_classes, ignore_index)
-    preds, target = _multiclass_confusion_matrix_format(preds, target, ignore_index, convert_to_labels=False)
-    measures, total = _custom_multiclass_hinge_loss_update(
-        preds, 
-        target, 
-        alpha,
-        squared, 
-        multiclass_mode,
-    )
-    return _hinge_loss_compute(measures, total)
-
-class CustomTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
-        input_ids, labels, attention_mask = inputs
-        # forward pass
-        outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
-        # logits = outputs.get("logits")
-        loss = outputs.loss
-        # # compute custom loss (suppose one has 3 labels with different weights)
-        # loss_fct = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0, 3.0], device=model.device))
-        # loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
-        return (loss, outputs) if return_outputs else loss
-    
-    def prediction_step(self, model, inputs, prediction_loss_only: bool, ignore_keys=None):
-        input_ids, labels, attention_mask = inputs
-        # forward pass
-        with torch.no_grad():
-            outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            logits = outputs.logits
-            loss = outputs.loss
-        return (loss, logits, labels)
-
-class CustomTrainerForgetting(Trainer):
-    def __init__(self, *args, **kwargs):
-        self.loss_type = kwargs.pop('forget_loss')
-        self.oracle_model = kwargs.pop('oracle_model')
-        self.eval_cfg = kwargs.pop('eval_cfg')
-
-        # Parameters added for NPO
-        self.seed = kwargs.pop('seed')
-        self.npo_coeff=kwargs.pop('npo_coeff')
-        self.grad_diff_coeff=kwargs.pop('grad_diff_coeff')
-        self.KL_coeff=kwargs.pop('KL_coeff')
-        self.ref_policy = kwargs.pop('ref_policy')
-        self.beta = kwargs.pop('beta')
-
-        super(CustomTrainerForgetting, self).__init__(*args, **kwargs)
-        if self.loss_type == "KL" or "npo" in self.loss_type:
-            self.oracle_model = self.e_prepare_deepspeed(self.oracle_model)
-
-    def e_prepare_deepspeed(self, model):
-        # Adapted from accelerate: https://github.com/huggingface/accelerate/blob/739b135f8367becb67ffaada12fe76e3aa60fefd/src/accelerate/accelerator.py#L1473
-        deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-        config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-
-        if model is not None:
-            if hasattr(model, "config"):
-                hidden_size = (
-                    max(model.config.hidden_sizes)
-                    if getattr(model.config, "hidden_sizes", None)
-                    else getattr(model.config, "hidden_size", None)
-                )
-                if hidden_size is not None and config_kwargs["zero_optimization"]["stage"] == 3:
-                    # Note that `stage3_prefetch_bucket_size` can produce DeepSpeed messages like: `Invalidate trace cache @ step 0: expected module 1, but got module 0`
-                    # This is expected and is not an error, see: https://github.com/microsoft/DeepSpeed/discussions/4081
-                    config_kwargs.update(
-                        {
-                            "zero_optimization.reduce_bucket_size": hidden_size * hidden_size,
-                            "zero_optimization.stage3_param_persistence_threshold": 10 * hidden_size,
-                            "zero_optimization.stage3_prefetch_bucket_size": 0.9 * hidden_size * hidden_size,
-                        }
-                    )
-
-        # If ZeRO-3 is used, we shard both the active and reference model.
-        # Otherwise, we assume the reference model fits in memory and is initialized on each device with ZeRO disabled (stage 0)
-        if config_kwargs["zero_optimization"]["stage"] != 3:
-            config_kwargs["zero_optimization"]["stage"] = 0
-        config_kwargs["optimizer"] = {"type": None}
-        model, *_ = deepspeed.initialize(model=model, config=config_kwargs)
-        model.eval()
-        #set the gradients to false for every parameter
-        for param in model.parameters():
-            param.requires_grad = False
-        
-        return model
-    
-
-    def compute_loss(self, model, inputs, return_outputs=False):
-        
-        if self.loss_type == "grad_ascent":
-            
-            forget_inputs, retain_inputs = inputs
-            input_ids, labels, attention_mask = forget_inputs
-            outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            forget_loss = outputs.loss
-            forget_loss = forget_loss * -1
-            loss = forget_loss
-
-        elif self.loss_type == "grad_diff":
-            
-            forget_inputs, retain_inputs = inputs
-            input_ids, labels, attention_mask = forget_inputs
-            outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
-            forget_loss = outputs.loss
-            forget_loss = forget_loss * -1
-
-            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
-            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
-            retain_loss = retain_outputs.loss
-            loss = forget_loss + retain_loss
-
-        elif self.loss_type == "IHL":
-            
-            forget_inputs, retain_inputs = inputs
-            input_ids, labels, attention_mask = forget_inputs
-            outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            #forget_loss = outputs.loss
-            #forget_loss = forget_loss * -1 # need to replace
-
-            scores = outputs.logits
-            shift_logits = scores[..., :-1, :].contiguous().squeeze().view(-1, scores.size(-1)) # [BN, V]
-            shift_labels = labels[..., 1:].contiguous().squeeze().view(-1) # [BN,]
-            forget_loss = multiclass_hinge_loss(
-                shift_logits[shift_labels != -100,:], # ignore pad tokens
-                shift_labels[shift_labels != -100],
-                shift_logits.size(-1),
-            )
-
-            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
-            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
-            retain_loss = retain_outputs.loss
-            
-            loss = forget_loss + retain_loss
-        
-        elif self.loss_type == "KL":
-            forget_inputs, retain_inputs = inputs
-            input_ids, labels, attention_mask = forget_inputs
-            outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
-            forget_loss = outputs.loss
-            forget_loss = forget_loss * -1
-            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
-            with torch.no_grad():
-                retain_outputs = self.oracle_model(
-                    retain_input_ids,labels=retain_labels, 
-                    attention_mask=retain_attention_mask
-                )
-            
-            retain_probs = F.log_softmax(retain_outputs.logits, dim=-1)
-            retain_probs = retain_probs.view(-1, retain_outputs.logits.shape[-1])
-
-            current_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
-            current_probs = F.log_softmax(current_outputs.logits, dim=-1)
-            current_probs = current_probs.view(-1, current_outputs.logits.shape[-1])
-
-            #minimum KL divergence
-            retain_loss = nn.functional.kl_div(current_probs, retain_probs, reduction='batchmean', log_target=True)
-            loss = forget_loss + retain_loss
-
-        elif self.loss_type == "idk":
-            idk_inputs, retain_inputs = inputs
-            idk_input_ids, idk_labels, idk_attention_mask = idk_inputs
-            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
-            
-            #concatenate the inputs. single forward pass is much more efficient
-            input_ids = torch.cat((idk_input_ids, retain_input_ids), dim=0)
-            labels = torch.cat((idk_labels, retain_labels), dim=0)
-            attention_mask = torch.cat((idk_attention_mask, retain_attention_mask), dim=0)
-            
-            outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
-            loss = outputs.loss
-        
-        elif self.loss_type == "dpo":
-            idk_inputs, forget_inputs, retain_inputs = inputs
-            idk_input_ids, idk_labels, idk_attention_mask = idk_inputs
-            forget_input_ids, forget_labels, forget_attention_mask = forget_inputs
-            idk_outputs = model(idk_input_ids,labels=idk_labels, attention_mask=idk_attention_mask)
-            forget_outputs = model(forget_input_ids,labels=forget_labels, attention_mask=forget_attention_mask)
-
-            with torch.no_grad():
-                idk_outputs_oracle = self.oracle_model(
-                    idk_input_ids,
-                    labels=idk_labels, 
-                    attention_mask=idk_attention_mask
-                )
-                forget_outputs_oracle = self.oracle_model(
-                    forget_input_ids,
-                    labels=forget_labels, 
-                    attention_mask=forget_attention_mask
-                )
-                idk_logits_oracle = idk_outputs_oracle.logits
-                forget_logits_oracle = forget_outputs_oracle.logits
-
-            idk_loss_oracle = -1 * get_batch_loss(idk_logits_oracle, idk_labels)
-            forget_loss_oracle = -1 * get_batch_loss(forget_logits_oracle, labels)
-            
-            idk_loss_current = -1 * get_batch_loss(idk_outputs.logits, idk_labels)
-            forget_loss_current = -1 * get_batch_loss(forget_outputs.logits, labels)
-
-
-            pi_logratios = idk_loss_current - forget_loss_current
-            ref_logratios = idk_loss_oracle - forget_loss_oracle
-
-            beta = 0.1
-            loss = -F.logsigmoid(beta * (pi_logratios - ref_logratios)).mean()
-            loss = -pi_logratios.mean()
-            loss = -idk_loss_current.mean()
-            outputs = forget_outputs
-            
-        elif self.loss_type == 'npo_grad_diff':
-            
-            forget_inputs, retain_inputs = inputs
-            input_ids, labels, attention_mask = forget_inputs
-            outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            forget_loss_current = get_batch_loss(outputs.logits, labels) 
-
-            if self.ref_policy == 'fine_tuned':
-                with torch.no_grad():
-                    forget_outputs_oracle = self.oracle_model(
-                        input_ids,labels=labels, 
-                        attention_mask=attention_mask
-                    )
-                    forget_logits_oracle = forget_outputs_oracle.logits
-                    forget_loss_oracle = get_batch_loss(forget_logits_oracle, labels)
-                neg_log_ratios = forget_loss_current - forget_loss_oracle
-            else:
-                raise NotImplementedError
-            forget_loss = -F.logsigmoid(self.beta * neg_log_ratios).mean() * 2 / self.beta
-
-            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
-            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
-            retain_loss = retain_outputs.loss
-            loss = self.npo_coeff * forget_loss + self.grad_diff_coeff * retain_loss
-        
-        return (loss, outputs) if return_outputs else loss
-        
-    
-    def prediction_step(self, model, inputs, prediction_loss_only: bool, ignore_keys=None):
-        input_ids, labels, attention_mask = inputs
-        # forward pass
-        with torch.no_grad():
-            outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
-            logits = outputs.logits
-            loss = outputs.loss
-        return (loss, logits, labels)
-
-    def evaluate(
-        self,
-        eval_dataset = None,
-        ignore_keys = None,
-        metric_key_prefix = "eval",
-    ):
-        # if eval is called w/o train, handle model prep here
-        if self.is_deepspeed_enabled and self.deepspeed is None:
-            _, _ = deepspeed_init(self, num_training_steps=0, inference=True)
-        args = self.args
-        model = self._wrap_model(self.model, training=False, dataloader=None)
-        print(
-            self.is_in_train, 
-            args.device, 
-            model.dtype, 
-            self.args.dataloader_num_workers, 
-            self.eval_cfg.split_list, 
-            self.eval_cfg.split
-        )
-        
-        if len(self.accelerator._models) == 0 and model is self.model:
-            model = (
-                self.accelerator.prepare(model)
-                if self.is_deepspeed_enabled
-                else self.accelerator.prepare_model(model, evaluation_mode=True)
-            )
-
-            if self.is_fsdp_enabled:
-                self.model = model
-
-            # for the rest of this function `model` is the outside model, whether it was wrapped or not
-            if model is not self.model:
-                self.model_wrapped = model
-
-            # backward compatibility
-            if self.is_deepspeed_enabled:
-                self.deepspeed = self.model_wrapped
-
-        # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
-        # while ``train`` is running, cast it to the right dtype first and then put on device
-        if not self.is_in_train:
-            if args.fp16_full_eval:
-                model = model.to(dtype=torch.float16, device=args.device)
-            elif args.bf16_full_eval:
-                model = model.to(dtype=torch.bfloat16, device=args.device)
-        model.eval()
-        curr_step = self.state.global_step
-        eval_cfg = self.eval_cfg
-
-        curr_save_dir = os.path.join(eval_cfg.save_dir, f"checkpoint-{curr_step}")
-        Path(curr_save_dir).mkdir(parents=True, exist_ok=True)
-        forget_rate = eval_cfg.split.split('_')[0]
-        with torch.no_grad():
-            for i, (
-                folder, 
-                split, 
-                question_key, 
-                answer_key, 
-                eval_task, 
-                base_answer_key, 
-                perturbed_answer_key
-            ) in enumerate(zip(
-                eval_cfg.data_path, 
-                eval_cfg.split_list, 
-                eval_cfg.question_key, 
-                eval_cfg.answer_key, 
-                eval_cfg.eval_task, 
-                eval_cfg.base_answer_key, 
-                eval_cfg.perturbed_answer_key
-            )):
-                
-                world_size = self.accelerator.num_processes
-
-                # For some reason, Hydra is not interprating the split correctly
-                if eval_task == 'eval_log_forget':
-                    split = eval_cfg.split
-                print(f'Working on eval task {eval_task} with split {split}')
-                save_filename = os.path.join(curr_save_dir, f"{eval_task}.json")
-                save_filename = save_filename if world_size == 1 else os.path.join(
-                    curr_save_dir, 
-                    f"{eval_task}_{self.accelerator.local_process_index}.json"
-                )
-                # print(save_filename)
-                if os.path.exists(save_filename) and not eval_cfg.overwrite:
-                    print(f"Skipping {eval_task} because {save_filename} already exists")
-                    continue
-
-                eval_dataloader, base_eval_dataloader, perturb_dataloader = get_dataloader(
-                    eval_cfg, 
-                    eval_task, 
-                    self.tokenizer, 
-                    folder, 
-                    split, 
-                    question_key, 
-                    answer_key, 
-                    base_answer_key, 
-                    perturbed_answer_key
-                )
-                eval_dataloader = self.accelerator.prepare(eval_dataloader)
-                # print('dataset condition: ', len(eval_dataloader.dataset), self.accelerator.local_process_index)
-                base_eval_dataloader = self.accelerator.prepare(base_eval_dataloader)
-                perturb_dataloader = self.accelerator.prepare(perturb_dataloader)
-                normalize_gt = False 
-                # if 'eval_log' not in eval_task:
-                #     normalize_gt = True
-
-                eval_logs = get_all_evals(
-                    eval_cfg, 
-                    model, 
-                    self.tokenizer, 
-                    eval_task, 
-                    eval_dataloader, 
-                    base_eval_dataloader, 
-                    perturb_dataloader, 
-                    normalize_gt=normalize_gt
-                )
-
-                with open(save_filename, "w") as f:
-                    # pretty write json to f
-                    json.dump(eval_logs, f, indent=4)
-            
-                #wait for all process to finish
-            self.accelerator.wait_for_everyone()
-            aggregated_eval_logs = {}
-            for eval_task in eval_cfg.eval_task:
-                #read the saved file as json and merge them using merge_dicts
-                if world_size > 1:
-                    if self.accelerator.is_local_main_process:
-                        eval_logs = json.load(open(os.path.join(curr_save_dir, f"{eval_task}_0.json")))
-                        for i in range(1, world_size):
-                            filename = os.path.join(curr_save_dir, f"{eval_task}_{i}.json")
-                            eval_logs = merge_dicts(eval_logs, json.load(open(filename)))
-                        
-                        aggregated_eval_logs[f'{eval_task}.json'] = eval_logs
-
-                        new_save_filename = os.path.join(curr_save_dir, f"{eval_task}.json")
-                        with open(new_save_filename, "w") as f:
-                            # pretty write json to f
-                            json.dump(eval_logs, f, indent=4)
-
-                            #delete old files use shutil
-
-                            for i in range(world_size):
-                                filename = os.path.join(curr_save_dir, f"{eval_task}_{i}.json")
-                                os.remove(filename)
-                                
-            if self.accelerator.is_local_main_process:
-                # aggregated_eval_logs = interleave_eval_result_dict(aggregated_eval_logs, forget_rate, large_bsz=eval_cfg.batch_size, num_processes=world_size)
-                aggregated_eval_log_filename = os.path.join(curr_save_dir, "eval_log_aggregated.json")
-
-                with open(aggregated_eval_log_filename, 'w') as f:
-                    json.dump(aggregated_eval_logs, f, indent=4)
-
-                if eval_cfg.retain_result is not None:
-                    model_utility = get_model_utility(aggregated_eval_logs)
-                    retain_result = json.load(open(eval_cfg.retain_result, 'r'))
-                    forget_quality = get_forget_quality(aggregated_eval_logs, retain_result)
-                    aggregate_stat = {**model_utility, **forget_quality}
-
-                    # save aggregate_stat as csv
-                    with open(os.path.join(curr_save_dir, "aggregate_stat.csv"), 'w') as csvfile:
-                        field_names = list(aggregate_stat.keys())
-                        writer = csv.DictWriter(csvfile, fieldnames=field_names)
-                        writer.writeheader()
-                        writer.writerow(aggregate_stat)
-
-def custom_data_collator_forget(samples):
-    forget_samples, retain_samples = [sample[0] for sample in samples], [sample[1] for sample in samples]
-    rets = []
-    for data_type in ["forget", "retain"]:
-        data = forget_samples if data_type == "forget" else retain_samples
-        input_ids = [s[0] for s in data]
-        labels = [s[1] for s in data]
-        attention_mask = [s[2] for s in data]
-        rets.append((torch.stack(input_ids), torch.stack(labels), torch.stack(attention_mask)))
-    return rets
-
-def compute_metrics(pred):
-    logits, labels = torch.from_numpy(pred.predictions), torch.from_numpy(pred.label_ids)
-    preds = torch.from_numpy(pred.predictions.argmax(-1))
-    shifted_labels = labels[..., 1:].contiguous()
-    acc = torch.mean((preds[..., :-1] == shifted_labels).float())
-    loss  = get_loss(logits, labels)
-    return {"eval accuracy": acc, "eval loss": loss.item()}
-
-def get_loss(output, labels):
-    shifted_labels = labels[..., 1:].contiguous()
-    output = output[..., :-1, :].contiguous()
-
-    loss_function = nn.CrossEntropyLoss(ignore_index=-100)
-    loss = loss_function(output.view(-1, output.size(-1)), shifted_labels.view(-1))
-
-    return loss
