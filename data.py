@@ -1,201 +1,166 @@
-# ---------- Data ----------
-class PairDataset(Dataset):
-    def __init__(self, path: str, tokenizer, max_len: int = 2048):
-        self.items = []
-        self.tok = tokenizer
-        self.max_len = max_len
+import os
+from collections import defaultdict
+from dataclasses import dataclass, field
+import numpy as np
+import torch
+from tqdm import tqdm
 
-        dec = json.JSONDecoder()
+from transformers import LlamaForCausalLM, AutoTokenizer, pipeline, GenerationConfig, AutoModelForCausalLM, set_seed
+from transformers.pipelines.pt_utils import KeyDataset
+from datasets import load_dataset, Dataset
 
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
 
-        # Fast path: whole file is a JSON array
-        if content.lstrip().startswith("["):
-            try:
-                data = json.loads(content)
-                if not isinstance(data, list):
-                    raise ValueError("Top-level JSON is not a list.")
-                for i, ex in enumerate(data, 1):
-                    self._validate_and_append(ex, file_line=i)
-                return
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"Failed to parse JSON array file '{path}': {e}") from e
+@dataclass
+class PreferenceSamplerConfig:
+    rm_device: int = field(default=0, metadata={'help': 'GPU index where the model is loaded into.'})
+    samples_drawn_size: int = field(default=2, metadata={'help': 'Size of preference pairs collected.'})
+    num_return_sequences: int = field(default=4, metadata={'help': 'How many samples are generated per policy before rejection sampling'})
+    generation_seed: int | None = field(default=42, metadata={'help': 'Sample generation seed'})
+    dataset_dir: str = field(default='ultrafeedback_iter1', metadata={'help': 'Dataset from which the prompts are sampled.'})
+    model_path: str = field(default='LLaMA3-SFT', metadata={'help': 'Policy being trained.'})
+    rm_path: str = field(default='FsfairX-LLaMA3-RM-v0.1', metadata={'help': 'Reward model which simulates human feedback.'})
 
-        # Helpers -------------------------------------------------------------
-        def advance_ws_and_seps(s: str, i: int):
-            """
-            Consume any combination of:
-              - whitespace (including real newlines),
-              - commas,
-              - literal '\\n' and literal '\\r\\n' sequences **between objects**.
-            Returns (new_i, advanced_any, new_lineno_delta).
-            """
-            N = len(s)
-            advanced = False
-            newlines = 0
 
-            # consume plain whitespace first
-            while i < N and s[i].isspace():
-                if s[i] == "\n":
-                    newlines += 1
-                i += 1
-                advanced = True
+class PreferenceSampler:
+    def __init__(self, config: PreferenceSamplerConfig):
+        self.config = config
+        dataset = load_dataset(config.dataset_dir)
+        # We consider only 1000 samples as the size of d_0
+        self.dataset = KeyDataset(dataset['train'].take(config.samples_drawn_size), 'context_messages')
 
-            # now repeatedly consume separators
-            while True:
-                progressed = False
-                # literal '\n'
-                if i + 1 < N and s[i] == "\\" and s[i+1] == "n":
-                    i += 2
-                    advanced = progressed = True
-                # literal '\r\n'
-                elif i + 3 < N and s[i:i+4] == "\\r\\n":
-                    i += 4
-                    advanced = progressed = True
-                # stray commas
-                elif i < N and s[i] == ",":
-                    i += 1
-                    advanced = progressed = True
+        self.model_path = config.model_path
+        self.rm_path = config.rm_path
 
-                # trailing whitespace after those separators
-                while i < N and s[i].isspace():
-                    if s[i] == "\n":
-                        newlines += 1
-                    i += 1
-                    advanced = True
 
-                if not progressed:
-                    break
+    def generate_responses(self) -> dict:
+        data_config = self.config
+        ref_tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        ref_model = LlamaForCausalLM.from_pretrained(self.model_path, device_map='cuda:0', torch_dtype=torch.bfloat16)
 
-            return i, advanced, newlines
-        # --------------------------------------------------------------------
+        num_return_sequences = data_config.num_return_sequences
 
-        i, N = 0, len(content)
-        lineno = 1
+        generate_config_policy_1 = GenerationConfig(
+            do_sample=True,
+            max_new_tokens=2048, # This is 2048 in Online RLHF paper
+            temperature=1.0,
+            top_k=0, # Online RLHF uses vLLM and there it defaults to -1. 0 in HF has the same behavior.
+            num_return_sequences=num_return_sequences, # This is 4 in Online RLHF paper. \pi_t^1
+            eos_token_id=[ref_model.config.eos_token_id], # Set EOS token id ('<|eot_id|>') to stop generating unnecessary EOS tokens. 
+            pad_token_id=ref_model.config.eos_token_id,
+            # batch_size=8 * 2
+            # use_cache=False # disable KV cache to get the complete attention score matrix after the system / user prompt.
+        )
 
-        # main streaming loop
-        while True:
-            i, _, nl = advance_ws_and_seps(content, i)
-            lineno += nl
-            if i >= N:
-                break
+        generate_config_policy_2 = GenerationConfig(
+            do_sample=True,
+            max_new_tokens=2048, # This is 2048 in Online RLHF paper
+            temperature=0.7,
+            top_k=0, # Online RLHF uses vLLM and there it defaults to -1. 0 in HF has the same behavior.
+            num_return_sequences=num_return_sequences, # This is 4 in Online RLHF paper. \pi_t^2
+            eos_token_id=[ref_model.config.eos_token_id], # Set EOS token id ('<|eot_id|>') to stop generating unnecessary EOS tokens. 
+            pad_token_id=ref_model.config.eos_token_id,
+            # batch_size=8 * 2
+            # use_cache=False # disable KV cache to get the complete attention score matrix after the system / user prompt.
+        )
 
-            # try to decode an object/value starting at i
-            try:
-                obj, end = dec.raw_decode(content, i)
-            except json.JSONDecodeError as e:
-                snippet = content[max(0, i-60):min(N, i+60)]
-                raise RuntimeError(
-                    f"JSON parse error in '{path}' near char {i} (approx line {lineno}): {e.msg}\n"
-                    f"...{snippet}..."
-                ) from e
+        model_pipeline = pipeline(
+            'text-generation', model=ref_model, 
+            tokenizer=ref_tokenizer, device_map='cuda', 
+            torch_dtype=torch.bfloat16)
 
-            self._validate_and_append(obj, file_line=lineno)
-            i = end  # continue scanning after this object
-            if i >= N:
-                break
+        # set_seed(data_config.generation_seed)
+
+        # idx = np.random.randint(low=0, high=len(self.dataset))
+        # prompt_sample_indices = [(idx + idx_1) % len(self.dataset) for idx_1 in range(2 * num_return_sequences)]
+
+        # responses = defaultdict({'response_1': [], 'response_2': []})
+        responses = defaultdict(lambda: defaultdict(list))
+
+        set_seed(data_config.generation_seed)
+        pbar_pipeline_1 = tqdm(model_pipeline(text_inputs=self.dataset, generation_config=generate_config_policy_1))
+
+        for idx, output in enumerate(pbar_pipeline_1, start=1):
+            pbar_pipeline_1.set_description(f'Sampling prompt {idx} from policy 1')
+
+            for sample in output:
+                responses[idx]['response_1'].append(sample['generated_text'])
+
+        set_seed(data_config.generation_seed)
+        pbar_pipeline_2 = tqdm(model_pipeline(text_inputs=self.dataset, generation_config=generate_config_policy_2) )
+
+        for idx, output in enumerate(pbar_pipeline_2, start=1):
+            pbar_pipeline_2.set_description(f'Sampling prompt {idx} from policy 2')
+
+            for sample in output:
+                responses[idx]['response_2'].append(sample['generated_text'])
+
+
+        return responses
+
+
+    def rejection_sampling(self, responses: dict):
+        data_config = self.config
+        rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path)
+
+        rm_pipe = pipeline(
+            "sentiment-analysis",
+            model=self.rm_path,
+            device='cuda:0',
+            tokenizer=rm_tokenizer,
+            model_kwargs={"torch_dtype": torch.bfloat16},
+            truncation=True,
+        )
+
+        pipe_kwargs = {
+            # "return_all_scores": True,
+            "top_k": None,
+            "function_to_apply": "none",
+            "batch_size": 1,
+        }
+
+        def get_reward(test_texts):
+            pipe_outputs = rm_pipe(test_texts, **pipe_kwargs)
+            rewards = [output[0]["score"] for output in pipe_outputs]
+            return rewards
+
+        samples = defaultdict(list)
+
+        for prompt_idx, response in responses.items():
+            for policy_key, policy_responses in response.items():
+                for prompt_response_pair in policy_responses:
+                    prompt, response = prompt_response_pair
+                    prompt_key = prompt['content']
+
+                    samples[prompt_key].append((prompt, response))
+
+        samples_preference_pair = {}
+
+        pbar_samples = tqdm(samples.items())
+
+        counter = 0
+
+        for prompt_key, chats in pbar_samples:
+            pbar_samples.set_description(f'Ranking prompt {counter + 1} samples')
+            counter += 1
+
+            rm_prompts = [chat.replace(rm_tokenizer.bos_token, "") for chat in rm_tokenizer.apply_chat_template(chats, tokenize=False, add_generation_prompt=False)]
+            rm_rewards = np.array(get_reward(rm_prompts))
             
-    def _validate_and_append(self, ex: Dict[str, Any], file_line: int, char_pos: int = None):
-        # Schema check: must have prompt/pos/neg strings
-        for k in ("prompt", "pos", "neg"):
-            if k not in ex or not isinstance(ex[k], str):
-                loc = f"line {file_line}" + (f", char {char_pos}" if char_pos is not None else "")
-                raise ValueError(f"Example at {loc} missing string field '{k}'. Got: {repr(ex.get(k))}")
-        self.items.append(ex)
+            best_response_idx, worst_response_idx = rm_rewards.argmax(), rm_rewards.argmin()
 
-    def __len__(self):
-        return len(self.items)
+            samples_preference_pair[prompt_key] = {
+                'best_response': chats[best_response_idx],
+                'worst_response': chats[worst_response_idx]
+            }
 
-    def __getitem__(self, idx):
-        return self.items[idx]
+        return samples_preference_pair
     
-
-def build_inputs(tokenizer, prompt: str, resp: str, max_len: int):
-    # Left-pad so loss/labels align at the end (common for causal LM DPO)
-    tokenizer.padding_side = "left"
-    tokenizer.truncation_side = "left"
-    text = prompt + resp
-    enc = tokenizer(text, return_tensors="pt", padding=False, truncation=True, max_length=max_len)
-    
-    # More efficient: encode prompt once and calculate response start position
-    p_len = len(tokenizer(prompt, padding=False, truncation=True, max_length=max_len)["input_ids"])
-    ids = enc["input_ids"][0]
-    total_len = len(ids)
-    
-    # Response starts after prompt tokens
-    resp_start = max(0, total_len - max(0, total_len - p_len))
-    mask = torch.zeros_like(ids, dtype=torch.bool)
-    mask[resp_start:] = True
-    return ids, enc["attention_mask"][0], mask
-
-def batchify(batch, tokenizer, max_len):
-    # Returns a dict of tensors for chosen and rejected
-    # Pre-allocate lists with correct size for efficiency
-    batch_size = len(batch)
-    ids_c, attn_c, mask_c = [None] * batch_size, [None] * batch_size, [None] * batch_size
-    ids_r, attn_r, mask_r = [None] * batch_size, [None] * batch_size, [None] * batch_size
-    prompts, chosens, rejects = [None] * batch_size, [None] * batch_size, [None] * batch_size
-    
-    for i, ex in enumerate(batch):
-        p, pos, neg = ex["prompt"], ex["pos"], ex["neg"]
-        ic, ac, mc = build_inputs(tokenizer, p, pos, max_len)
-        ir, ar, mr = build_inputs(tokenizer, p, neg, max_len)
-        ids_c[i], attn_c[i], mask_c[i] = ic, ac, mc
-        ids_r[i], attn_r[i], mask_r[i] = ir, ar, mr
-        prompts[i], chosens[i], rejects[i] = p, pos, neg
-    
-    def pad_stack(seqs):
-        lens = [len(s) for s in seqs]
-        maxL = max(lens)
-        pad_id = tokenizer.pad_token_id
-        # Use stack instead of full+loop for better performance
-        out = torch.full((len(seqs), maxL), pad_id, dtype=torch.long)
-        mask = torch.zeros((len(seqs), maxL), dtype=torch.long)
-        for i, s in enumerate(seqs):
-            slen = len(s)
-            out[i, -slen:] = s
-            mask[i, -slen:] = 1
-        return out, mask
-    
-    def pad_bool(seqs):
-        maxL = max(len(s) for s in seqs)
-        out = torch.zeros((len(seqs), maxL), dtype=torch.bool)
-        for i, s in enumerate(seqs):
-            out[i, -len(s):] = s
-        return out
-    
-    c_ids, c_attn_mask = pad_stack(ids_c)
-    r_ids, r_attn_mask = pad_stack(ids_r)
-    c_resp_mask = pad_bool(mask_c)
-    r_resp_mask = pad_bool(mask_r)
-    
-    return {
-        "c_ids": c_ids, "c_attn": c_attn_mask, "c_resp_mask": c_resp_mask,
-        "r_ids": r_ids, "r_attn": r_attn_mask, "r_resp_mask": r_resp_mask,
-        "prompts": prompts, "chosens": chosens, "rejects": rejects
-    }
-
-# ---------- Logprob utilities ----------
-def seq_logprobs(model, input_ids, attention_mask, resp_mask, requires_grad=False):
-    # Compute sum log p(y|x) over response tokens only (causal shift)
-    # Use context manager only if gradients not required (for reference model)
-    context_mgr = torch.no_grad() if not requires_grad else torch.enable_grad()
-    
-    with context_mgr:
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-    
-    logits = outputs.logits[:, :-1, :]
-    labels = input_ids[:, 1:]
-    attn = attention_mask[:, 1:]
-    resp = resp_mask[:, 1:]  # align after shift
-    
-    # Use more efficient indexing: gather + squeeze in one op
-    logp_tok = F.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
-    
-    # Keep only tokens that are both attended and in response (combine operations)
-    use = attn.bool() & resp.bool()
-    
-    # Mask and sum in one step - more efficient than masked_fill + sum
-    seq_logp = (logp_tok * use.float()).sum(dim=1)
-    return seq_logp
+if __name__ == '__main__':
+    config = PreferenceSamplerConfig(
+        dataset_dir='RLHFlow/ultrafeedback_iter1',
+        model_path='RLHFlow/LLaMA3-SFT',
+        rm_path='sfairXC/FsfairX-LLaMA3-RM-v0.1'
+    )
+    pref_sampler = PreferenceSampler(config=config)
+    responses = pref_sampler.generate_responses()
+    preference_samples = pref_sampler.rejection_sampling(responses=responses)

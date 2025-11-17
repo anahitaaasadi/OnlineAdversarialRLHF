@@ -5,21 +5,13 @@ from transformers import Trainer
 import torch.nn.functional as F
 import copy, os
 import deepspeed
-from evaluate_util import get_dataloader, get_all_evals
 import copy
 import json 
 from pathlib import Path
-from data_module import get_batch_loss 
-from utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
 import numpy as np
 from scipy.stats import ks_2samp, hmean
 import csv 
 from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
-
-def printll(name, inp):
-    #print list with 4 decimal for each item
-    print(name, [round(x, 4) for x in inp])
-
 from torchmetrics.classification import MulticlassHingeLoss
 from torchmetrics.utilities.data import to_onehot
 from torchmetrics.metric import Metric
@@ -29,6 +21,14 @@ from torchmetrics.functional.classification.hinge import (
     _multiclass_hinge_loss_tensor_validation,
     _hinge_loss_compute
 )
+
+from IHL.data_module import get_batch_loss 
+from IHL.utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
+from IHL.evaluate_util import get_dataloader, get_all_evals
+
+def printll(name, inp):
+    #print list with 4 decimal for each item
+    print(name, [round(x, 4) for x in inp])
 
 def _custom_multiclass_hinge_loss_update(
     preds,
