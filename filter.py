@@ -1,4 +1,4 @@
-# ---------- Adversary & filter ----------
+import torch
 
 def flip_labels_uncertainty_targeting_text(lp_c_pi, lp_r_pi, flip_rate: float):
     # Flip labels for a fraction with smallest |margin|
