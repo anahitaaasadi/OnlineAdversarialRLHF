@@ -97,7 +97,6 @@ class PreferenceSampler:
 
         return responses
 
-
     def rejection_sampling(self, responses: dict):
         data_config = self.config
         rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path)
