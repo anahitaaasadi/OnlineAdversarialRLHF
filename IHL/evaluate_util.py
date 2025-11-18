@@ -8,7 +8,7 @@ import evaluate
 import json
 from pathlib import Path
 from rouge_score import rouge_scorer
-from utils import get_model_identifiers_from_yaml, get_model_utility, get_forget_quality
+from IHL.utils import get_model_identifiers_from_yaml, get_model_utility, get_forget_quality
 import torch.nn as nn
 import csv 
 import numpy as np 

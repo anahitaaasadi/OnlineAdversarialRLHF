@@ -8,3 +8,4 @@ checkpoints/
 *.pth
 *.ckpt
 .DS_Store
+rlhf/
