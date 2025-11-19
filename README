@@ -1,56 +1,8 @@
-[Corruption-Robust Online RLHF Proposal]
+# Corruption-Robust Online RLHF
 
-Team: Anahita Asadi, Vaibhav Bhargava
+**Team:** Anahita Asadi, Vaibhav Bhargava
 
-## Abstract
-
-We propose a corruption-robust framework for online Reinforcement Learning from Human Feedback (RLHF) that extends the methodology of [1] to adversarial settings. Online RLHF solves poor generalizability of offline RLHF, yet current solutions remain sensitive to corrupted human preferences. To address this, an algorithm for detection and mitigation of corrupted feedback is proposed that flags adversary by performing uncertainty quantification, gathered through attention heads in the policy model. Next, instead of retraining model with the clean model from scratch at the face of adversary, machine unlearning is incorporated to selectively forget corrupted preferences while retaining reliable ones. This is achieved using a novel hybrid objective combining Direct Preference Optimization (DPO) for clean data and Inverse Hinge Loss (IHL) for corrupted samples. Our approach enables continual, corruption-resilient alignment and improves robustness in real-time RLHF pipelines. The framework is evaluated on multiple benchmarks to demonstrate its enhanced stability and alignment performance under adversarial conditions.
-
-## Motivation
-
-Offline RLHF often fails to cover the entire prompt response space due to the finite dataset, causing the policy model to perform poorly when faced with out-of-distribution data [2], motivating online RLHF counterparts. However, humans or adversaries can leave incorrect feedback, affecting customer service, education, and content moderation, highlighting the need for a corruption-robust online RLHF framework.
-
-## Problem Formulation
-
-We extend the setting of online RLHF from [1] by introducing adversarial attacks on the preference of the two responses following their work. At time step $t$, a preference pair dataset, $D_t=\{(x_i,a_i^w,a_i^l,y_i)\}_{i=1}^m$, is added to a pre-existing dataset $D$. The attack on the preference dataset randomly flips the preference label $y_i$. Such attacks may lead to higher uncertainty of the preference model. Previous work uses KL-divergence of target distribution $q_i=(y_i,1-y_i)$ and prediction $\hat q_i=(p_i,1-p_i)$ and defines the trustworthiness of samples $D_\text{clean}=\{i:\mathrm{KL}_i < \tau_{\text{low}}\}$, $D_\text{corrupt}=\{i:\mathrm{KL}_i > \tau_{\text{high}}\}$, and ambiguous samples between the thresholds, a method highly dependent on choosing the correct $\tau_{\text{low}}$ and $\tau_{\text{high}}$ [3].
-
-Our proposed approach aims to first identify preference pairs that contribute to higher uncertainty, we can estimate uncertainty by calculating $s_i = \log \det \text{attn}_i$, where $\text{attn}_{i}$ represents the $i^{\text{th}}$ attention head of the $(t - 1)^{\text{th}}$ learned policy model $\pi_{t - 1}$. Preference pairs that do not agree will be considered adversarially corrupted. A simple label flip to these pairs is an easy way to mitigate such corruptions for learning $\pi_{t}$. However, looking at the preference pairs from previous time steps, it is possible that uncertainty is being induced from prior preference pairs, so we must reconsider all the preference pairs from $D_t \ \forall t \in [T]$ and recompute the uncertainty score and segregate $D_{1:t - 1}$ into $D_{\text{clean}}$ and $D_{\text{corrupt}}$.
-
-Furthermore, instead of relearning the policy $\pi_{t}$ after recomputing the uncertainty score, we will utilize machine unlearning to unlearn corrupt preferences from $D_{\text{corrupt}}$ while learning or retaining preference from $D_{\text{clean}}$. These preferences are learned using the inverse hinge loss function from [5] (along with DPO [6]) $\mathcal{L}_{\text{IHL}} = 1 + p_{\pi}(x_{t} | x_{<t}) - \max_{\nu \ne x_{t}}(p_{\pi}(\nu | x_{<t}))$ where $\nu$ is the set of alternative tokens to $x_{t}$. After time step $T$, we output the best policy against a holdout set from time step 1 to $T$.
-
-## Objective
-
-Our objective is to minimize $\mathcal{L}_{\text{DPO}}(t)$ and $\mathcal{L}_{\text{IHL}}(t)$ for each time step $t$ and compare our results on the GSM-8K dataset [7] and LC Alpaca 2 [8]. As a reminder of the formulas:
-
-$$
-\begin{split}
-    & \mathcal{L}_{\text{DPO}}(t) = - \mathbf{E}_{(x, a^w, a^l) \sim \mathcal{D}_{\text{clean}}} [\log \sigma (\eta \log \frac{\pi_t(a^w | x)}{\pi_0(a^w | x)} - \eta \frac{\pi_t(a^l | x)}{\pi_0(a^l | x)}] \\
-    & \mathcal{L}_{\text{IHL}}(t) = \mathbf{E}_{(x, a^w, a^l) \sim \mathcal{D}_{\text{corrupted}}} (1 + \pi_t(a^w | x) - \max_{v \ne a^w} \pi_t(v | x))
-\end{split}
-$$
-
-For this purpose:
-
-- GSM-8K will be evaluated using the exact match score (scaled to 100.0) as a table.
-- LC Alpaca 2 win rate VS. iterations of the online RLHF algorithm in [1] will be plotted.
-
-## References
-
-[1] Hanze Dong, Wei Xiong, Bo Pang, Haoxiang Wang, Han Zhao, Yingbo Zhou, Nan Jiang, Doyen Sahoo, Caiming Xiong, and Tong Zhang, "RLHF workflow: From reward modeling to online RLHF," Transactions on Machine Learning Research, 2024, ISSN 2835-8856, https://openreview.net/forum?id=a13aYUU9eU
-
-[2] Collin Burns, Pavel Izmailov, Jan Hendrik Kirchner, Bowen Baker, Leo Gao, Leopold Aschenbrenner, Yining Chen, Adrien Ecoffet, Manas Joglekar, Jan Leike, Ilya Sutskever, and Jeffrey Wu, "Weak-to-strong generalization: Eliciting strong capabilities with weak supervision," Proceedings of the International Conference on Machine Learning, pp. 4971-5012, Jul 2024, https://proceedings.mlr.press/v235/burns24b.html
-
-[3] Jie Cheng, Gang Xiong, Xingyuan Dai, Qinghai Miao, Yisheng Lv, and Fei-Yue Wang, "RIME: Robust preference-based reinforcement learning with noisy preferences," Proceedings of the International Conference on Machine Learning, volume 235 of Proceedings of Machine Learning Research, pp. 8229–8247, Jul 2024, https://proceedings.mlr.press/v235/cheng24k.html
-
-[4] Gaurang Sriramanan, Siddhant Bharti, Vinu Sankar Sadasivan, Shoumik Saha, Priyatham Kattakinda, and Soheil Feizi, "LLM-check: Investigating detection of hallucinations in large language models," Advances in Neural Information Processing Systems, volume 37, pp. 34188-4216, https://proceedings.neurips.cc/paper_files/paper/2024/file/3c1e1fdf305195cd620c118aaa9717ad-Paper-Conference.pdf
-
-[5] Sungmin Cha, Sungjun Cho, Dasol Hwang, and Moontae Lee, "Towards robust and parameter-efficient knowledge unlearning for LLMs," The Thirteenth International Conference on Learning Representations, 2025, https://openreview.net/forum?id=1ExfUpmIW4
-
-[6] Rafael Rafailov, Archit Sharma, Eric Mitchell, Christopher D Manning, Stefano Ermon, and Chelsea Finn, "Direct preference optimization: Your language model is secretly a reward model," Conference on Neural Information Processing Systems, 2023, https://openreview.net/forum?id=HPuSIXJaa9
-
-[7] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman, "Training verifiers to solve math word problems," arXiv preprint arXiv: 2110.14168, 2021.
-
-[8] Xuechen Li, Tianyi Zhang, Yann Dubois, Rohan Taori, Ishaan Gulrajani, Carlos Guestrin, Percy Liang, and Tatsunori B. Hashimoto, "Alpacaeval: An automatic evaluator of instruction-following models," 2023, https://github.com/tatsu-lab/alpaca_eval.
+This repository implements an online RLHF (Reinforcement Learning from Human Feedback) framework designed to be robust against adversarially corrupted preference data. The pipeline combines preference sampling, corruption simulation, filtering, and alternating DPO + IHL training.
 
 ---
 
@@ -58,80 +10,86 @@ For this purpose:
 
 ## Directory Structure
 
-- `main.py`: Entry point for running the online RLHF workflow.
-- `data.py`: Contains the `PreferenceSampler` class for generating and sampling preference data.
-- `filter.py`: Implements functions for simulating adversarial corruption and filtering clean/corrupt samples.
-- `requirements.txt`: Lists required Python packages.
-- `BestMods/`: Stores saved model checkpoints after each RLHF iteration.
-- `DPO/`: Contains DPO (Direct Preference Optimization) utilities and training logic.
-- `IHL/`: Implements Inverse Hinge Loss (IHL) and machine unlearning logic.
-- `rlhf/`: Python virtual environment (venv) and dependencies.
-- Other files/folders: `README`, `__pycache__/`, etc.
+- **`main.py`** — Entry point for running the full online RLHF workflow.
+- **`data.py`** — Defines `PreferenceSampler` for generating prompt–response pairs and sampling preferences.
+- **`filter.py`** — Implements adversarial corruption simulation and filtering utilities.
+- **`requirements.txt`** — Python package dependencies.
+- **`BestMods/`** — Stores model checkpoints for each RLHF iteration.
+- **`DPO/`** — Contains Direct Preference Optimization (DPO) utilities and trainer extensions.
+- **`IHL/`** — Contains Inverse Hinge Loss (IHL) and machine unlearning components.
+- **`rlhf/`** — Python virtual environment directory (optional).
+- **Other files** — `README`, caches, and supporting code.
+
+---
 
 ## Installation
 
-1. **Python Environment**  
-	Create and activate a Python virtual environment (recommended):
-	```bash
-	python3 -m venv rlhf
-	source rlhf/bin/activate
-	```
+1. **Create a Python environment** (recommended):
+    ```bash
+    python3 -m venv rlhf
+    source rlhf/bin/activate
+    ```
 
-2. **Install Dependencies**  
-	Install all required packages:
-	```bash
-	pip install -r requirements.txt
-	```
+2. **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-## Workflow Overview
+---
 
-1. **Sampling Preferences**  
-	Uses `PreferenceSampler` (in `data.py`) to generate prompt-response pairs and simulate human feedback via a reward model.
+## Workflow Summary
+
+1. **Preference Sampling**  
+   `PreferenceSampler` generates prompt–response pairs and assigns preference labels using a reward model.
 
 2. **Corruption Simulation**  
-	Adversarial corruption is simulated by flipping preference labels for a fraction of samples using uncertainty targeting (`filter.py`).
+   A fraction of labels are flipped to simulate adversarial corruption. Uncertainty-targeted corruption is provided in `filter.py`.
 
 3. **Filtering**  
-	Samples are filtered into clean and corrupt sets using margin-based or agreement-based methods.
+   Samples are split into *clean* and *corrupt-suspected* groups using margin- or agreement-based filters.
 
-4. **Training**
-	- **DPO Step**: Clean samples are used to update the policy model via Direct Preference Optimization (`DPO/DPO_utils.py`).
-	- **IHL Unlearning Step**: Corrupt samples are used for machine unlearning via Inverse Hinge Loss (`IHL/IHL_Loss.py`).
+4. **Training Loop**
+   - **DPO Step:** Clean samples update the policy using Direct Preference Optimization (`DPO/DPO_utils.py`).
+   - **IHL Step:** Suspected corrupt samples are used for unlearning via the Inverse Hinge Loss (`IHL/IHL_Loss.py`).
 
-5. **Model Saving**  
-	After each iteration, the updated policy model is saved in `BestMods/iteration_X`.
+5. **Checkpointing**  
+   After each iteration, the updated policy is saved in `BestMods/iteration_X`.
 
 6. **Evaluation**  
-	After training, models can be evaluated on GSM-8K and LC Alpaca 2 benchmarks.
+   Final models can be evaluated on GSM-8K and LC-Alpaca-2 benchmarks.
 
-## Code Explanation
+---
 
-- **main.py**:  
-  - Defines `OnlineRLHFConfig` for all hyperparameters.
-  - Implements the full online RLHF loop (`run_online_rlhf`):
-	 - Loads models and tokenizer.
-	 - Iteratively samples preferences, simulates corruption, filters samples, trains with DPO and IHL, and saves checkpoints.
-	 - Cleans up GPU memory between iterations.
-  - CLI entry point allows configuration via command-line arguments.
+## Code Components
 
-- **data.py**:  
-  - `PreferenceSamplerConfig` and `PreferenceSampler` handle dataset loading and response generation.
+### `main.py`
+- Defines the `OnlineRLHFConfig` hyperparameter class.
+- Implements the full online RLHF loop: loading models, sampling preferences, simulating corruption, filtering, DPO/IHL training, checkpointing, and GPU memory cleanup.
+- CLI interface allows passing configuration parameters.
 
-- **filter.py**:  
-  - Functions for flipping labels (simulating adversarial corruption) and filtering samples by uncertainty or agreement.
+### `data.py`
+- Implements `PreferenceSamplerConfig` and `PreferenceSampler`.
+- Handles dataset loading and model-driven response generation.
 
-- **DPO/DPO_utils.py**:  
-  - `MyDPOTrainer` extends the DPOTrainer for preference optimization.
+### `filter.py`
+- Functions for label corruption, uncertainty-based flipping, and margin/agreement-based filtering.
 
-- **IHL/IHL_Loss.py**:  
-  - `CustomTrainerForgetting` implements machine unlearning using the inverse hinge loss.
+### `DPO/DPO_utils.py`
+- Extends the standard DPO trainer with `MyDPOTrainer`.
+
+### `IHL/IHL_Loss.py`
+- Implements inverse hinge loss and unlearning using `CustomTrainerForgetting`.
+
+---
 
 ## How to Run
 
-After installation, run the main workflow:
-```bash
-python main.py --num_iterations 3 --samples_per_iter 128 --flip_rate 0.2 --margin_tau 0.1 --device cuda:0
-```
-Adjust arguments as needed for your experiment.
+Run the full online RLHF workflow:
 
----
+```bash
+python main.py \
+    --num_iterations 3 \
+    --samples_per_iter 128 \
+    --flip_rate 0.2 \
+    --margin_tau 0.1 \
+    --device cuda:0
