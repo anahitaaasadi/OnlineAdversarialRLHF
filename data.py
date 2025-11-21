@@ -2,6 +2,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 import gc
+import json
 
 import torch
 import numpy as np
@@ -126,7 +127,9 @@ class PreferenceSampler:
 
             samples_preference_pair[prompt_key] = {
                 'best_response': chats[best_response_idx],
-                'worst_response': chats[worst_response_idx]
+                'worst_response': chats[worst_response_idx],
+                'best_reward': rm_rewards.max(),
+                'worst_reward': rm_rewards.min(),
             }
 
         del rm_pipe
@@ -209,9 +212,9 @@ class PreferenceSampler:
 
 if __name__ == '__main__':
     MODEL_DIR = os.path.join('/home/vbharg4@AD', 'models')
-    ds_id = os.path.join(os.getcwd(), "ultrafeedback_iter1")
-    ref_model_path = os.path.join(MODEL_DIR, 'LLaMA3-SFT')
-    reward_model_path = os.path.join(MODEL_DIR, 'FsfairX-LLaMA3-RM-v0.1')
+    ds_id = os.path.join(os.getcwd(), "RLHFlow/ultrafeedback_iter1")
+    ref_model_path = os.path.join(MODEL_DIR, 'RLHFlow/LLaMA3-SFT')
+    reward_model_path = os.path.join(MODEL_DIR, 'sfairXC/FsfairX-LLaMA3-RM-v0.1')
 
     config = PreferenceSamplerConfig(dataset_dir=ds_id, model_path=ref_model_path, rm_path=reward_model_path)
     pref_sampler = PreferenceSampler(config=config)

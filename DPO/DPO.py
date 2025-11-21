@@ -6,9 +6,11 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from DPO_alignment import H4ArgumentParser
+from DPO.DPO_alignment import H4ArgumentParser
 from trl import DPOConfig, ModelConfig
-from DPO_utils import MyDPOTrainer
+from DPO.DPO_utils import MyDPOTrainer
+
+from PreferenceSampler import PreferenceSamplerConfig, PreferenceSampler
 
 @dataclass
 class ScriptArguments:
@@ -87,67 +89,32 @@ class ScriptArguments:
 
 
 def prepare_data(
-    data_dir: str = "/home/xiongwei/data/helpful/rm/rm1003.jsonl",
+    # data_dir: str,
+    samples_preference_pair: dict,
     sanity_check: bool = False,
     margin_scale=1,
-    choose_type="random",
+    # choose_type="random",
     eot_token="",
-    length_penalty=0,
+    # length_penalty=0,
 ) -> Dataset:
-    ds = load_dataset("json", data_files=data_dir, split="train")
-    print(ds)
+    # ds = load_dataset("json", data_files=data_dir, split="train")
+    # print(ds)
 
     pos = []
     neg = []
     prompts = []
-
     margin = []
-    for sample in ds:
-        P = tokenizer.apply_chat_template(sample["prompt"], tokenize = False, add_generation_prompt= True)
-        if choose_type == "random":
-            idx0 = 0
-            idx1 = 1
-        elif choose_type == "max_random":
-            idx0 = np.argmax(sample["rewards"])
-            if idx0 == 0:
-                idx1 = 1
-            else:
-                idx1 = 0
-        elif choose_type == "max_min":
-            idx0 = np.argmax(sample["rewards"])
-            idx1 = np.argmin(sample["rewards"])
-        elif choose_type == "max_max":
-            sorted_indices = np.argsort(sample["rewards"])
-            idx0 = sorted_indices[-1]
-            idx1 = sorted_indices[-2]
-        elif choose_type == "max_min_p":
-            r = [
-                sample["rewards"][i] - length_penalty * len(sample["responses"][i])
-                for i in range(len(sample["rewards"]))
-            ]
-            idx0 = np.argmax(r)
-            idx1 = np.argmin(r)
-        else:
-            raise NotImplementedError
-
-        if type(idx0) == np.ndarray or type(idx0) == list:
-            assert len(idx0) == len(idx1)
-            for i in range(len(idx0)):
-                prompts.append(P)
-                pos.append(sample["responses"][idx0[i]] + eot_token)
-                neg.append(sample["responses"][idx1[i]] + eot_token)
-                margin.append((sample["rewards"][idx0[i]] - sample["rewards"][idx1[i]]) * margin_scale)
-        else:
-            if sample["rewards"][idx0] > sample["rewards"][idx1]:
-                prompts.append(P)
-                pos.append(sample["responses"][idx0] + eot_token)
-                neg.append(sample["responses"][idx1] + eot_token)
-                margin.append((sample["rewards"][idx0] - sample["rewards"][idx1]) * margin_scale)
-            elif sample["rewards"][idx0] < sample["rewards"][idx1]:
-                prompts.append(P)
-                pos.append(sample["responses"][idx1] + eot_token)
-                neg.append(sample["responses"][idx0] + eot_token)
-                margin.append((-sample["rewards"][idx0] + sample["rewards"][idx1]) * margin_scale)
+    
+    for prompt_key, pairs in samples_preference_pair.items():
+        prompts.append(prompt_key)
+        best_resp = pairs["best_response"]
+        worst_resp = pairs["worst_response"]
+        best_reward = float(pairs["best_reward"])
+        worst_reward = float(pairs["worst_reward"])
+        pos.append(best_resp + eot_token)
+        neg.append(worst_resp + eot_token)
+        margin.append((best_reward - worst_reward) * margin_scale)
+            
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
     if sanity_check:
@@ -157,7 +124,6 @@ def prepare_data(
 
 
 if __name__ == "__main__":
-
     parser = H4ArgumentParser((ScriptArguments, DPOConfig, ModelConfig))
     script_args, training_args, model_config = parser.parse()
 
@@ -195,26 +161,48 @@ if __name__ == "__main__":
         model_ref.config.pad_token_id = tokenizer.pad_token_id
         model.resize_token_embeddings(len(tokenizer))
         model_ref.resize_token_embeddings(len(tokenizer))
+    
+    """newly added:"""
+    MODEL_DIR = os.path.join('/home/vbharg4@AD', 'models')
 
-    # 2. Load the Stack-exchange paired dataset
-    train_dataset = prepare_data(
-        data_dir=script_args.train_dir,
-        margin_scale=script_args.margin_scale,
-        sanity_check=script_args.sanity_check,
-        choose_type=script_args.choose_type,
-        eot_token=script_args.eot_token,
-        length_penalty=script_args.len_penalty,
+    # if this is a HF hub ID ("RLHFlow/ultrafeedback_iter1"), you can also
+    # just pass that string directly; this version assumes local path:
+    ds_id = os.path.join(os.getcwd(), "RLHFlow/ultrafeedback_iter1")
+    ref_model_path = os.path.join(MODEL_DIR, 'RLHFlow/LLaMA3-SFT')
+    reward_model_path = os.path.join(MODEL_DIR, 'sfairXC/FsfairX-LLaMA3-RM-v0.1')
+
+    # IMPORTANT: the config field is ref_model_path, not model_path
+    pref_config = PreferenceSamplerConfig(
+        dataset_dir=ds_id,
+        ref_model_path=ref_model_path,
+        rm_path=reward_model_path,
     )
+    pref_sampler = PreferenceSampler(config=pref_config)
 
-    if script_args.max_training_samples > 0:
-        train_dataset = train_dataset.select(range(script_args.max_training_samples))
+    # Generate samples from the current policy
+    outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
+
+    # Get best/worst pairs & their rewards from the reward model
+    pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
 
     # 3. Load evaluation dataset
+    train_dataset = prepare_data(
+        samples_preference_pair=pref_pairs,
+        sanity_check=script_args.sanity_check,
+        margin_scale=script_args.margin_scale,
+        eot_token=script_args.eot_token,
+    )
+    
     eval_dataset = prepare_data(
-        data_dir=script_args.eval_dir,
+        samples_preference_pair=pref_pairs,
         sanity_check=True,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
+    )
+    """newly added"""
+    
+    eval_dataset = train_dataset.select(
+        range(min(len(train_dataset), 100))
     )
     print(training_args)
 
