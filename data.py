@@ -126,7 +126,9 @@ class PreferenceSampler:
 
             samples_preference_pair[prompt_key] = {
                 'best_response': chats[best_response_idx],
-                'worst_response': chats[worst_response_idx]
+                'worst_response': chats[worst_response_idx],
+                'best_reward': rm_rewards.max(),
+                'worst_reward': rm_rewards.min()
             }
 
         del rm_pipe
