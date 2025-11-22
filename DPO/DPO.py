@@ -6,11 +6,14 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from DPO.DPO_alignment import H4ArgumentParser
+from DPO_alignment import H4ArgumentParser
 from trl import DPOConfig, ModelConfig
-from DPO.DPO_utils import MyDPOTrainer
+from DPO_utils import MyDPOTrainer
 
-from PreferenceSampler import PreferenceSamplerConfig, PreferenceSampler
+# Why does this refer 
+from data import PreferenceSamplerConfig, PreferenceSampler
+
+# from PreferenceSampler import PreferenceSamplerConfig, PreferenceSampler
 
 @dataclass
 class ScriptArguments:

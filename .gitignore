@@ -9,3 +9,4 @@ checkpoints/
 *.ckpt
 .DS_Store
 rlhf/
+rlhf2/
