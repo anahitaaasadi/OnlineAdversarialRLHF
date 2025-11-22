@@ -19,9 +19,9 @@ class MyDPOTrainer(DPOTrainer):
         self,
         model: Optional[Union[PreTrainedModel, nn.Module, str]] = None,
         ref_model: Optional[Union[PreTrainedModel, nn.Module, str]] = None,
-        beta: float = 0.1,
-        label_smoothing: float = 0,
-        loss_type: Optional[str] = None,
+        # beta: float = 0.1,
+        # label_smoothing: float = 0,
+        # loss_type: Optional[str] = None,
         args: Optional[DPOConfig] = None,
         data_collator: Optional[DataCollator] = None,
         label_pad_token_id: int = -100,
@@ -54,9 +54,9 @@ class MyDPOTrainer(DPOTrainer):
         super().__init__(
             model=model,
             ref_model=ref_model,
-            beta=beta,
-            label_smoothing=label_smoothing,
-            loss_type=loss_type,
+            # beta=beta,
+            # label_smoothing=label_smoothing,
+            # loss_type=loss_type,
             args=args,
             data_collator=data_collator,
             label_pad_token_id=label_pad_token_id,
@@ -462,7 +462,7 @@ class MyDPOTrainer(DPOTrainer):
                 "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
             )
 
-        compute_loss_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        compute_loss_context_manager = amp.autocast(self.args.device)
 
         with compute_loss_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
@@ -495,7 +495,7 @@ class MyDPOTrainer(DPOTrainer):
             else:
                 ignore_keys = []
 
-        prediction_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        prediction_context_manager = amp.autocast(self.args.device)
 
         with torch.no_grad(), prediction_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")

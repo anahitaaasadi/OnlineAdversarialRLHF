@@ -14,78 +14,31 @@ from data import PreferenceSamplerConfig, PreferenceSampler
 
 @dataclass
 class ScriptArguments:
-    ref_model: Optional[str] = field(
-        default=os.path.join('/home/vbharg4@AD', 'models', 'LLaMA3-SFT'),
-        metadata={"help": "the location of the SFT model name or path"},
-    )
-    train_dir: Optional[str] = field(
-        default="./data/uf_split0_responses_K8_reward.json",
-        metadata={"help": "the location of the dataset name or path"},
-    )
-    eval_dir: Optional[str] = field(
-        default="/export/home/hanze/project/vllm-gen/uf_split0_offline_reward.json",  # "/export/home/data/gemma_it_2b_3w_k8_with_pairrm_rewards.json",
-        metadata={"help": "the location of the evalset name or path"},
-    )
-    # learning_rate: Optional[float] = field(default=5e-7, metadata={"help": "optimizer learning rate"})
-    # lr_scheduler_type: Optional[str] = field(
-    #     default="constant_with_warmup", metadata={"help": "the lr scheduler type"}
-    # )
-    # warmup_steps: Optional[int] = field(default=100, metadata={"help": "the number of warmup steps"})
-    # weight_decay: Optional[float] = field(default=0.01, metadata={"help": "the weight decay"})
-    # optimizer_type: Optional[str] = field(default="paged_adamw_32bit", metadata={"help": "the optimizer type"})
+    ref_model: Optional[str] = field(default="")
+    reward_model: Optional[str] = field(default="")
+    train_dir: Optional[str] = field(default="")
+    eval_dir: Optional[str] = field(default="")
 
-    # per_device_train_batch_size: Optional[int] = field(default=1, metadata={"help": "train batch size per device"})
-    # per_device_eval_batch_size: Optional[int] = field(default=1, metadata={"help": "eval batch size per device"})
-    # gradient_accumulation_steps: Optional[int] = field(
-    #     default=16, metadata={"help": "the number of gradient accumulation steps"}
-    # )
-    # gradient_checkpointing: Optional[bool] = field(
-    #     default=True, metadata={"help": "whether to use gradient checkpointing"}
-    # )
+    device: Optional[str] = field(default="cuda:1")
+    ref_device: Optional[int] = field(default=1)
+    rm_device: Optional[int] = field(default=1)
 
-    eos_padding: Optional[bool] = field(default=True, metadata={"help": "whether to pad with eos token"})
-    # lora_alpha: Optional[float] = field(default=16, metadata={"help": "the lora alpha parameter"})
-    # lora_dropout: Optional[float] = field(default=0.05, metadata={"help": "the lora dropout parameter"})
-    # lora_r: Optional[int] = field(default=8, metadata={"help": "the lora r parameter"})
+    eos_padding: Optional[bool] = field(default=True)
+    margin_scale: Optional[float] = field(default=1.0)
+    sanity_check: Optional[bool] = field(default=False)
+    max_training_samples: Optional[int] = field(default=-1)
+    choose_type: Optional[str] = field(default="max_random")
+    ignore_bias_buffers: Optional[bool] = field(default=False)
+    eot_token: Optional[str] = field(default="<|eot_id|>")
+    len_penalty: Optional[float] = field(default=0.0)
 
-    margin_scale: Optional[float] = field(default=1.0, metadata={"help": "the margin scale"})
-
-    # max_prompt_length: Optional[int] = field(default=1000, metadata={"help": "the maximum prompt length"})
-    # max_length: Optional[int] = field(default=2048, metadata={"help": "the maximum sequence length"})
-    # max_steps: Optional[int] = field(default=20, metadata={"help": "max number of training steps"})
-    # num_train_epochs: Optional[int] = field(default=2, metadata={"help": "max number of training epochs"})
-    # logging_steps: Optional[int] = field(default=2, metadata={"help": "the logging frequency"})
-    # save_strategy: Optional[str] = field(default="epoch", metadata={"help": "the saving strategy"})
-    # save_steps: Optional[int] = field(default=50000, metadata={"help": "the saving frequency"})
-    # eval_steps: Optional[int] = field(default=100, metadata={"help": "the evaluation frequency"})
-    # run_name: Optional[str] = field(default="dpo_soft", metadata={"help": "the run name"})
-    # loss_type: Optional[str] = field(default="sigmoid", metadata={"help": "the loss type"})
-    # output_dir: Optional[str] = field(default="./dpo_soft", metadata={"help": "the output directory"})
-    # log_freq: Optional[int] = field(default=1, metadata={"help": "the logging frequency"})
-
-    sanity_check: Optional[bool] = field(default=False, metadata={"help": "only train on 1000 samples"})
-    max_training_samples: Optional[int] = field(default=-1, metadata={"help": "the maximum sample size"})
-    choose_type: Optional[str] = field(default="max_random", metadata={"help": "the choose type"})
-
-    # report_to: Optional[str] = field(
-    #     default="wandb",
-    #     metadata={
-    #         "help": 'The list of integrations to report the results and logs to. Supported platforms are `"azure_ml"`,'
-    #         '`"comet_ml"`, `"mlflow"`, `"neptune"`, `"tensorboard"`,`"clearml"` and `"wandb"`. '
-    #         'Use `"all"` to report to all integrations installed, `"none"` for no integrations.'
-    #     },
-    # )
-    
-    ignore_bias_buffers: Optional[bool] = field(
-        default=False,
-        metadata={
-            "help": "fix for DDP issues with LM bias/mask buffers - invalid scalar type,`inplace operation. See"
-            "https://github.com/huggingface/transformers/issues/22482#issuecomment-1595790992"
-        },
-    )
-    eot_token: Optional[str] = field(default="", metadata={"help": "the end of text token"})
-    # mask_prompt: Optional[bool] = field(default=False, metadata={"help": "mask prompt"})
-    len_penalty: Optional[float] = field(default=0, metadata={"help": "the length penalty"})
+    # === PreferenceSamplerConfig fields ===
+    samples_drawn_size: int = field(default=20)
+    num_return_sequences: int = field(default=4)
+    generation_seed: Optional[int] = field(default=42)
+    dataset_dir: str = field(default="RLHFlow/ultrafeedback_iter1")
+    ref_gpu_utlization: float = field(default=0.5)
+    rm_batch_size: int = field(default=8)
 
 
 def prepare_data(
@@ -124,19 +77,17 @@ def prepare_data(
 
 
 if __name__ == "__main__":
-
-
     parser = H4ArgumentParser((ScriptArguments, DPOConfig, ModelConfig))
     script_args, training_args, model_config = parser.parse()
+    
+    if model_config.model_name_or_path is None:
+            model_config.model_name_or_path = script_args.ref_model
 
-    model_config.model_name_or_path = os.path.join('/home/vbharg4@AD', 'models', 'LLaMA3-SFT')
-
-    # 1. load a pretrained model
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         attn_implementation="flash_attention_2",
-        torch_dtype=torch.float16,
-    )
+        dtype=torch.float16,
+    ).to(script_args.device)
     model.config.use_cache = False
 
     if script_args.ignore_bias_buffers:
@@ -153,9 +104,10 @@ if __name__ == "__main__":
 
     model_ref = AutoModelForCausalLM.from_pretrained(
         ref_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-    )
+    ).to(script_args.device)
+    
     tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     if script_args.eos_padding:
         tokenizer.pad_token = tokenizer.eos_token
@@ -168,30 +120,23 @@ if __name__ == "__main__":
         model.resize_token_embeddings(len(tokenizer))
         model_ref.resize_token_embeddings(len(tokenizer))
     
-    """newly added:"""
-    MODEL_DIR = os.path.join('/home/vbharg4@AD', 'models')
-
-    # if this is a HF hub ID ("RLHFlow/ultrafeedback_iter1"), you can also
-    # just pass that string directly; this version assumes local path:
-    ds_id = os.path.join(os.getcwd(), "ultrafeedback_iter1")
-    ref_model_path = os.path.join(MODEL_DIR, 'LLaMA3-SFT')
-    reward_model_path = os.path.join(MODEL_DIR, 'FsfairX-LLaMA3-RM-v0.1')
-
-    # IMPORTANT: the config field is ref_model_path, not model_path
     pref_config = PreferenceSamplerConfig(
-        dataset_dir=ds_id,
-        ref_model_path=ref_model_path,
-        rm_path=reward_model_path,
+        samples_drawn_size=script_args.samples_drawn_size,
+        num_return_sequences=script_args.num_return_sequences,
+        generation_seed=script_args.generation_seed,
+        dataset_dir=script_args.dataset_dir,
+        ref_model_path=script_args.ref_model,
+        ref_device=script_args.ref_device,
+        ref_gpu_utlization=script_args.ref_gpu_utlization,
+        rm_path=script_args.reward_model,
+        rm_batch_size=script_args.rm_batch_size,
+        rm_device=script_args.rm_device,
     )
     pref_sampler = PreferenceSampler(config=pref_config)
 
-    # Generate samples from the current policy
     outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
-
-    # Get best/worst pairs & their rewards from the reward model
     pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
 
-    # 3. Load evaluation dataset
     train_dataset = prepare_data(
         samples_preference_pair=pref_pairs,
         sanity_check=script_args.sanity_check,
@@ -205,20 +150,15 @@ if __name__ == "__main__":
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
     )
-    """newly added"""
     
-    eval_dataset = train_dataset.select(
-        range(min(len(train_dataset), 100))
-    )
+    eval_dataset = train_dataset.select(range(min(len(train_dataset), 100)))
 
-    # 5. initialize the DPO trainer
     dpo_trainer = MyDPOTrainer(
         model,
         model_ref,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # beta=training_args.beta,
         tokenizer=tokenizer,
         max_length=training_args.max_length,
         max_prompt_length=training_args.max_prompt_length,
@@ -226,10 +166,8 @@ if __name__ == "__main__":
     )
     print("begin to train")
 
-    # 6. train
     dpo_trainer.train()
     dpo_trainer.save_model(training_args.output_dir)
 
-    # 7. save
     output_dir = os.path.join(training_args.output_dir, "final_checkpoint")
     dpo_trainer.model.save_pretrained(output_dir)

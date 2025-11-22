@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from datasets import Dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import DPOConfig
 
 from data import PreferenceSampler, PreferenceSamplerConfig
 from filter import (
@@ -15,10 +16,11 @@ from filter import (
     filter_by_margin,
     filter_by_agreement,
 )
-from DPO.DPO_utils import MyDPOTrainer
-from trl import DPOConfig
-from IHL.IHL_Loss import CustomTrainerForgetting
-from IHL.IHL_module import convert_raw_data_to_model_format, custom_data_collator
+
+from DPO_alignment import H4ArgumentParser
+from DPO_utils import MyDPOTrainer
+from IHL_Loss import CustomTrainerForgetting
+from IHL_module import convert_raw_data_to_model_format, custom_data_collator
 
 
 @dataclass
@@ -35,8 +37,8 @@ class OnlineRLHFConfig:
 
     # online RLHF
     num_iterations: int = 2
-    flip_rate: float = 0.2        # fraction of prefs to corrupt
-    margin_tau: float = 0.1       # threshold for filter_by_margin
+    flip_rate: float = 0.2
+    margin_tau: float = 0.1
 
     # DPO hyperparams
     dpo_output_dir: str = "checkpoints/dpo_online"
@@ -54,7 +56,7 @@ class OnlineRLHFConfig:
     ihl_learning_rate: float = 5e-7
     ihl_train_batch_size: int = 1
     ihl_num_epochs: int = 1
-    ihl_loss_type: str = "IHL"   # This corresponds to your CustomTrainerForgetting
+    ihl_loss_type: str = "IHL"
 
     # misc
     device: str = "cuda:0"
@@ -352,10 +354,6 @@ def ihl_train_step(
     return trainer.model
 
 
-# =======================
-# 3. Online RLHF loop
-# =======================
-
 def run_online_rlhf(cfg: OnlineRLHFConfig):
     device = cfg.device
     
@@ -488,38 +486,13 @@ def run_online_rlhf(cfg: OnlineRLHFConfig):
 
     print("\nFinished online RLHF loop. You can now run GSM8K / Alpaca eval using evaluate_util.py etc.")
 
-
-# =======================
-# 4. CLI entry point
-# =======================
-
-def parse_args() -> OnlineRLHFConfig:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--policy_model_name", type=str, default="RLHFlow/LLaMA3-SFT")
-    parser.add_argument("--ref_model_name", type=str, default="RLHFlow/LLaMA3-SFT")
-    parser.add_argument("--rm_model_name", type=str, default="sfairXC/FsfairX-LLaMA3-RM-v0.1")
-    parser.add_argument("--ulf_dataset_dir", type=str, default="RLHFlow/ultrafeedback_iter1")
-    parser.add_argument("--num_iterations", type=int, default=3)
-    parser.add_argument("--samples_per_iter", type=int, default=128)
-    parser.add_argument("--flip_rate", type=float, default=0.2)
-    parser.add_argument("--margin_tau", type=float, default=0.1)
-    parser.add_argument("--device", type=str, default="cuda:0")
-
-    args = parser.parse_args()
-    cfg = OnlineRLHFConfig(
-        policy_model_name=args.policy_model_name,
-        ref_model_name=args.ref_model_name,
-        rm_model_name=args.rm_model_name,
-        ulf_dataset_dir=args.ulf_dataset_dir,
-        num_iterations=args.num_iterations,
-        samples_per_iter=args.samples_per_iter,
-        flip_rate=args.flip_rate,
-        margin_tau=args.margin_tau,
-        device=args.device,
-    )
+    
+def parse_args_yaml() -> OnlineRLHFConfig:
+    parser = H4ArgumentParser((OnlineRLHFConfig,))
+    cfg = parser.parse()
     return cfg
 
 
 if __name__ == "__main__":
-    cfg = parse_args()
+    cfg = parse_args_yaml()
     run_online_rlhf(cfg)
