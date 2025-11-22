@@ -22,9 +22,9 @@ from torchmetrics.functional.classification.hinge import (
     _hinge_loss_compute
 )
 
-from IHL.utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
-from IHL.evaluate_util import get_dataloader, get_all_evals
-from IHL.data_module import get_batch_loss 
+from IHL.IHL_utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
+from IHL.IHL_evaluate import get_dataloader, get_all_evals
+from IHL.IHL_module import get_batch_loss 
 
 def printll(name, inp):
     #print list with 4 decimal for each item

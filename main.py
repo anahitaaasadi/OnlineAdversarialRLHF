@@ -18,7 +18,7 @@ from filter import (
 from DPO.DPO_utils import MyDPOTrainer
 from trl import DPOConfig
 from IHL.IHL_Loss import CustomTrainerForgetting
-from IHL.data_module import convert_raw_data_to_model_format, custom_data_collator
+from IHL.IHL_module import convert_raw_data_to_model_format, custom_data_collator
 
 
 @dataclass
@@ -250,7 +250,7 @@ def build_ihl_dataset_from_pairs(
 
     # You need a model_configs YAML on disk that get_model_identifiers_from_yaml(model_family) can read.
     # Here we assume the YAML is already in place and model_family points to it.
-    from IHL.utils import get_model_identifiers_from_yaml
+    from IHL.IHL_utils import get_model_identifiers_from_yaml
     model_configs = get_model_identifiers_from_yaml(model_family)
 
     for q, a in zip(questions, answers):
