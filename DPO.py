@@ -10,15 +10,12 @@ from DPO_alignment import H4ArgumentParser
 from trl import DPOConfig, ModelConfig
 from DPO_utils import MyDPOTrainer
 
-# Why does this refer 
 from data import PreferenceSamplerConfig, PreferenceSampler
-
-# from PreferenceSampler import PreferenceSamplerConfig, PreferenceSampler
 
 @dataclass
 class ScriptArguments:
     ref_model: Optional[str] = field(
-        default="",
+        default=os.path.join('/home/vbharg4@AD', 'models', 'LLaMA3-SFT'),
         metadata={"help": "the location of the SFT model name or path"},
     )
     train_dir: Optional[str] = field(
@@ -127,8 +124,12 @@ def prepare_data(
 
 
 if __name__ == "__main__":
+
+
     parser = H4ArgumentParser((ScriptArguments, DPOConfig, ModelConfig))
     script_args, training_args, model_config = parser.parse()
+
+    model_config.model_name_or_path = os.path.join('/home/vbharg4@AD', 'models', 'LLaMA3-SFT')
 
     # 1. load a pretrained model
     model = AutoModelForCausalLM.from_pretrained(
@@ -147,6 +148,8 @@ if __name__ == "__main__":
         ref_name = script_args.ref_model
     else:
         ref_name = model_config.model_name_or_path
+
+    print(ref_name, script_args.ref_model, model_config.model_name_or_path)
 
     model_ref = AutoModelForCausalLM.from_pretrained(
         ref_name,
@@ -170,9 +173,9 @@ if __name__ == "__main__":
 
     # if this is a HF hub ID ("RLHFlow/ultrafeedback_iter1"), you can also
     # just pass that string directly; this version assumes local path:
-    ds_id = os.path.join(os.getcwd(), "RLHFlow/ultrafeedback_iter1")
-    ref_model_path = os.path.join(MODEL_DIR, 'RLHFlow/LLaMA3-SFT')
-    reward_model_path = os.path.join(MODEL_DIR, 'sfairXC/FsfairX-LLaMA3-RM-v0.1')
+    ds_id = os.path.join(os.getcwd(), "ultrafeedback_iter1")
+    ref_model_path = os.path.join(MODEL_DIR, 'LLaMA3-SFT')
+    reward_model_path = os.path.join(MODEL_DIR, 'FsfairX-LLaMA3-RM-v0.1')
 
     # IMPORTANT: the config field is ref_model_path, not model_path
     pref_config = PreferenceSamplerConfig(
@@ -207,7 +210,6 @@ if __name__ == "__main__":
     eval_dataset = train_dataset.select(
         range(min(len(train_dataset), 100))
     )
-    print(training_args)
 
     # 5. initialize the DPO trainer
     dpo_trainer = MyDPOTrainer(
@@ -216,7 +218,7 @@ if __name__ == "__main__":
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        beta=training_args.beta,
+        # beta=training_args.beta,
         tokenizer=tokenizer,
         max_length=training_args.max_length,
         max_prompt_length=training_args.max_prompt_length,
