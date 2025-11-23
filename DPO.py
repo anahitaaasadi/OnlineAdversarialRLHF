@@ -1,4 +1,5 @@
 import os
+import yaml
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -7,8 +8,8 @@ import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from DPO_alignment import H4ArgumentParser
-from trl import DPOConfig, ModelConfig
-from DPO_utils import MyDPOTrainer
+from trl import DPOConfig, ModelConfig, DPOTrainer
+# from DPO_utils import MyDPOTrainer
 
 from data import PreferenceSamplerConfig, PreferenceSampler
 
@@ -60,12 +61,12 @@ def prepare_data(
     
     for prompt_key, pairs in samples_preference_pair.items():
         prompts.append(prompt_key)
-        best_resp = pairs["best_response"]
-        worst_resp = pairs["worst_response"]
+        best_resp = pairs["best_response"].removeprefix(prompt_key)
+        worst_resp = pairs["worst_response"].removeprefix(prompt_key)
         best_reward = float(pairs["best_reward"])
         worst_reward = float(pairs["worst_reward"])
-        pos.append(best_resp + eot_token)
-        neg.append(worst_resp + eot_token)
+        pos.append(best_resp)
+        neg.append(worst_resp)
         margin.append((best_reward - worst_reward) * margin_scale)
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
@@ -79,6 +80,8 @@ def prepare_data(
 if __name__ == "__main__":
     parser = H4ArgumentParser((ScriptArguments, DPOConfig, ModelConfig))
     script_args, training_args, model_config = parser.parse()
+
+    training_args.learning_rate = float(training_args.learning_rate)
     
     if model_config.model_name_or_path is None:
             model_config.model_name_or_path = script_args.ref_model
@@ -86,8 +89,9 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         attn_implementation="flash_attention_2",
-        dtype=torch.float16,
-    ).to(script_args.device)
+        dtype=torch.float16,)
+    # ).to(script_args.device)
+    model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
     if script_args.ignore_bias_buffers:
@@ -100,13 +104,13 @@ if __name__ == "__main__":
     else:
         ref_name = model_config.model_name_or_path
 
-    print(ref_name, script_args.ref_model, model_config.model_name_or_path)
-
     model_ref = AutoModelForCausalLM.from_pretrained(
         ref_name,
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    ).to(script_args.device)
+        attn_implementation="flash_attention_2",)
+    # ).to(script_args.device)
+
+    model_ref.gradient_checkpointing_enable()
     
     tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     if script_args.eos_padding:
@@ -134,35 +138,47 @@ if __name__ == "__main__":
     )
     pref_sampler = PreferenceSampler(config=pref_config)
 
-    outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
-    pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
+    import json
+
+    # TODO: Sampling needs to be done outside this script. We are using accelerate to do DPO training.
+
+    # outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
+    # pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
+
+    with open('20k_responses/preference_samples.json') as f:
+        pref_pairs = json.load(f)
+
+    items = list(pref_pairs.items())[:2100]
+
+    train_pref_pairs = {k: v for (k, v) in items[:2000]}
+    eval_pref_pairs = {k: v for (k, v) in items[2000:]}
 
     train_dataset = prepare_data(
-        samples_preference_pair=pref_pairs,
+        samples_preference_pair=train_pref_pairs,
         sanity_check=script_args.sanity_check,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
     )
     
     eval_dataset = prepare_data(
-        samples_preference_pair=pref_pairs,
+        samples_preference_pair=eval_pref_pairs,
         sanity_check=True,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
     )
     
-    eval_dataset = train_dataset.select(range(min(len(train_dataset), 100)))
+    # eval_dataset = train_dataset.select(range(min(len(train_dataset), 100)))
 
-    dpo_trainer = MyDPOTrainer(
+    dpo_trainer = DPOTrainer(
         model,
         model_ref,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
-        max_length=training_args.max_length,
-        max_prompt_length=training_args.max_prompt_length,
-        loss_type=training_args.loss_type,
+        processing_class=tokenizer
+        # max_length=training_args.max_length,
+        # max_prompt_length=training_args.max_prompt_length,
+        # loss_type=training_args.loss_type,
     )
     print("begin to train")
 

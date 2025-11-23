@@ -24,32 +24,32 @@ class MyDPOTrainer(DPOTrainer):
         # loss_type: Optional[str] = None,
         args: Optional[DPOConfig] = None,
         data_collator: Optional[DataCollator] = None,
-        label_pad_token_id: int = -100,
-        padding_value: Optional[int] = None,
-        truncation_mode: str = "keep_end",
+        # label_pad_token_id: int = -100,
+        # padding_value: Optional[int] = None,
+        # truncation_mode: str = "keep_end",
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        model_init: Optional[Callable[[], PreTrainedModel]] = None,
-        callbacks: Optional[List[TrainerCallback]] = None,
-        optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        max_length: Optional[int] = None,
-        max_prompt_length: Optional[int] = None,
-        max_target_length: Optional[int] = None,
-        peft_config: Optional[Dict] = None,
-        is_encoder_decoder: Optional[bool] = None,
-        disable_dropout: bool = True,
-        generate_during_eval: bool = False,
-        compute_metrics: Optional[Callable[[EvalLoopOutput], Dict]] = None,
-        precompute_ref_log_probs: bool = False,
-        dataset_num_proc: Optional[int] = None,
-        model_init_kwargs: Optional[Dict] = None,
-        ref_model_init_kwargs: Optional[Dict] = None,
-        model_adapter_name: Optional[str] = None,
-        ref_adapter_name: Optional[str] = None,
-        reference_free: bool = False,
-        force_use_ref_model: bool = False,
+        processing_class: Optional[PreTrainedTokenizerBase] = None,
+        # model_init: Optional[Callable[[], PreTrainedModel]] = None,
+        # callbacks: Optional[List[TrainerCallback]] = None,
+        # optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
+        # preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        # max_length: Optional[int] = None,
+        # max_prompt_length: Optional[int] = None,
+        # max_target_length: Optional[int] = None,
+        # peft_config: Optional[Dict] = None,
+        # is_encoder_decoder: Optional[bool] = None,
+        # disable_dropout: bool = True,
+        # generate_during_eval: bool = False,
+        # compute_metrics: Optional[Callable[[EvalLoopOutput], Dict]] = None,
+        # precompute_ref_log_probs: bool = False,
+        # dataset_num_proc: Optional[int] = None,
+        # model_init_kwargs: Optional[Dict] = None,
+        # ref_model_init_kwargs: Optional[Dict] = None,
+        # model_adapter_name: Optional[str] = None,
+        # ref_adapter_name: Optional[str] = None,
+        # reference_free: bool = False,
+        # force_use_ref_model: bool = False,
     ):
         super().__init__(
             model=model,
@@ -59,32 +59,32 @@ class MyDPOTrainer(DPOTrainer):
             # loss_type=loss_type,
             args=args,
             data_collator=data_collator,
-            label_pad_token_id=label_pad_token_id,
-            padding_value=padding_value,
-            truncation_mode=truncation_mode,
+            # label_pad_token_id=label_pad_token_id,
+            # padding_value=padding_value,
+            # truncation_mode=truncation_mode,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
-            model_init=model_init,
-            callbacks=callbacks,
-            optimizers=optimizers,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-            max_length=max_length,
-            max_prompt_length=max_prompt_length,
-            max_target_length=max_target_length,
-            peft_config=peft_config,
-            is_encoder_decoder=is_encoder_decoder,
-            disable_dropout=disable_dropout,
-            generate_during_eval=generate_during_eval,
-            compute_metrics=compute_metrics,
-            precompute_ref_log_probs=precompute_ref_log_probs,
-            dataset_num_proc=dataset_num_proc,
-            model_init_kwargs=model_init_kwargs,
-            ref_model_init_kwargs=ref_model_init_kwargs,
-            model_adapter_name=model_adapter_name,
-            ref_adapter_name=ref_adapter_name,
-            reference_free=reference_free,
-            force_use_ref_model=force_use_ref_model,
+            processing_class=processing_class,
+            # model_init=model_init,
+            # callbacks=callbacks,
+            # optimizers=optimizers,
+            # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            # max_length=max_length,
+            # max_prompt_length=max_prompt_length,
+            # max_target_length=max_target_length,
+            # peft_config=peft_config,
+            # is_encoder_decoder=is_encoder_decoder,
+            # disable_dropout=disable_dropout,
+            # generate_during_eval=generate_during_eval,
+            # compute_metrics=compute_metrics,
+            # precompute_ref_log_probs=precompute_ref_log_probs,
+            # dataset_num_proc=dataset_num_proc,
+            # model_init_kwargs=model_init_kwargs,
+            # ref_model_init_kwargs=ref_model_init_kwargs,
+            # model_adapter_name=model_adapter_name,
+            # ref_adapter_name=ref_adapter_name,
+            # reference_free=reference_free,
+            # force_use_ref_model=force_use_ref_model,
         )
 
 
@@ -97,10 +97,10 @@ class MyDPOTrainer(DPOTrainer):
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         
         chosen_logratios = policy_chosen_logps.to(self.accelerator.device) - (
-            not self.reference_free
+            not self.args.reference_free
         ) * reference_chosen_logps.to(self.accelerator.device)
         rejected_logratios = policy_rejected_logps.to(self.accelerator.device) - (
-            not self.reference_free
+            not self.args.reference_free
         ) * reference_rejected_logps.to(self.accelerator.device)
 
         if self.f_divergence_type == FDivergenceType.ALPHA_DIVERGENCE.value:
@@ -116,7 +116,7 @@ class MyDPOTrainer(DPOTrainer):
             logits = (cap_exp(rejected_logratios * -alpha_coef) - cap_exp(chosen_logratios * -alpha_coef)) / alpha_coef
         else:
             pi_logratios = policy_chosen_logps - policy_rejected_logps
-            if self.reference_free:
+            if self.args.reference_free:
                 ref_logratios = torch.tensor([0], dtype=pi_logratios.dtype, device=pi_logratios.device)
             else:
                 ref_logratios = reference_chosen_logps - reference_rejected_logps
@@ -137,17 +137,17 @@ class MyDPOTrainer(DPOTrainer):
         # The beta is a temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5.
         # We ignore the reference model as beta -> 0. The label_smoothing parameter encodes our uncertainty about the labels and
         # calculates a conservative DPO loss.
-        if self.loss_type == "sigmoid":
+        if self.args.loss_type == "sigmoid":
             losses = (
                 -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
                 - F.logsigmoid(-self.beta * logits) * self.label_smoothing
             )
-        elif self.loss_type == "robust":
+        elif self.args.loss_type == "robust":
             losses = (
                 -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
                 + F.logsigmoid(-self.beta * logits) * self.label_smoothing
             ) / (1 - 2 * self.label_smoothing)
-        elif self.loss_type == "exo_pair":
+        elif self.args.loss_type == "exo_pair":
             # eqn (16) of the EXO paper: https://huggingface.co/papers/2402.00856
             import math
 
@@ -156,12 +156,12 @@ class MyDPOTrainer(DPOTrainer):
             losses = (self.beta * logits).sigmoid() * (
                 F.logsigmoid(self.beta * logits) - math.log(1 - self.label_smoothing)
             ) + (-self.beta * logits).sigmoid() * (F.logsigmoid(-self.beta * logits) - math.log(self.label_smoothing))
-        elif self.loss_type == "hinge":
+        elif self.args.loss_type == "hinge":
             losses = torch.relu(1 - self.beta * logits)
-        elif self.loss_type == "ipo":
+        elif self.args.loss_type == "ipo":
             # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.
             losses = (logits - 1 / (2 * self.beta)) ** 2
-        elif self.loss_type == "bco_pair":
+        elif self.args.loss_type == "bco_pair":
             chosen_logratios = policy_chosen_logps - reference_chosen_logps
             rejected_logratios = policy_rejected_logps - reference_rejected_logps
 
@@ -174,13 +174,13 @@ class MyDPOTrainer(DPOTrainer):
             losses = -F.logsigmoid((self.beta * chosen_logratios) - delta) - F.logsigmoid(
                 -(self.beta * rejected_logratios - delta)
             )
-        elif self.loss_type == "sppo_hard":
+        elif self.args.loss_type == "sppo_hard":
             # In the paper (https://huggingface.co/papers/2405.00675), SPPO employs a soft probability approach, estimated using the PairRM score. The probability calculation is conducted outside of the trainer class. The version described here is the hard probability version, where P in Equation (4.7) of Algorithm 1 is set to 1 for the winner and 0 for the loser.
             a = policy_chosen_logps - reference_chosen_logps
             b = policy_rejected_logps - reference_rejected_logps
 
             losses = (a - 0.5 / self.beta) ** 2 + (b + 0.5 / self.beta) ** 2
-        elif self.loss_type == "nca_pair":
+        elif self.args.loss_type == "nca_pair":
             chosen_rewards = (policy_chosen_logps - reference_chosen_logps) * self.beta
             rejected_rewards = (policy_rejected_logps - reference_rejected_logps) * self.beta
             losses = (
@@ -188,7 +188,7 @@ class MyDPOTrainer(DPOTrainer):
                 - 0.5 * F.logsigmoid(-chosen_rewards)
                 - 0.5 * F.logsigmoid(-rejected_rewards)
             )
-        elif self.loss_type == "aot_pair":
+        elif self.args.loss_type == "aot_pair":
             chosen_logratios = policy_chosen_logps - reference_chosen_logps
             rejected_logratios = policy_rejected_logps - reference_rejected_logps
 
@@ -202,7 +202,7 @@ class MyDPOTrainer(DPOTrainer):
                 - F.logsigmoid(-self.beta * delta) * self.label_smoothing
             )
 
-        elif self.loss_type == "aot":
+        elif self.args.loss_type == "aot":
             pi_logratios = policy_chosen_logps - policy_rejected_logps
             ref_logratios = reference_chosen_logps - reference_rejected_logps
 
@@ -216,7 +216,7 @@ class MyDPOTrainer(DPOTrainer):
                 - F.logsigmoid(-self.beta * delta) * self.label_smoothing
             )
 
-        elif self.loss_type == "apo_zero":
+        elif self.args.loss_type == "apo_zero":
             # Eqn (7) of the APO paper (https://huggingface.co/papers/2408.06266)
             # Use this loss when you believe the chosen outputs are better than your model's default output
 
@@ -225,7 +225,7 @@ class MyDPOTrainer(DPOTrainer):
 
             losses = losses_chosen + losses_rejected
 
-        elif self.loss_type == "apo_down":
+        elif self.args.loss_type == "apo_down":
             # Eqn (8) of the APO paper (https://huggingface.co/papers/2408.06266)
             # Use this loss when you believe the chosen outputs are worse than your model's default output
 
@@ -238,7 +238,7 @@ class MyDPOTrainer(DPOTrainer):
 
         else:
             raise ValueError(
-                f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'exo_pair', 'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'apo_zero', 'apo_down']"
+                f"Unknown loss type: {self.args.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'exo_pair', 'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'apo_zero', 'apo_down']"
             )
 
         chosen_rewards = (
@@ -297,33 +297,40 @@ class MyDPOTrainer(DPOTrainer):
 
         We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
+
+        # print(*list(batch.keys()), sep='\n')
+
+        # print(batch['prompt_attention_mask'].shape)
+        # print(batch['prompt_attention_mask'].sum(dim=-1))
+    
+
         concatenated_batch = self.concatenated_inputs(
             batch,
-            is_encoder_decoder=self.is_encoder_decoder,
-            is_vision_model=self.is_vision_model,
-            label_pad_token_id=self.label_pad_token_id,
-            padding_value=self.padding_value,
-            device=self.accelerator.device,
+            # is_encoder_decoder=self.is_encoder_decoder,
+            # is_vision_model=self.is_vision_model,
+            # label_pad_token_id=self.label_pad_token_id,
+            padding_value=self.pad_token_id,
+            # device=self.accelerator.device,
         )
-        len_chosen = batch["chosen_labels"].shape[0]
+        len_chosen = batch["prompt_input_ids"].shape[0]
 
         model_kwargs = {}
 
-        if self.is_encoder_decoder:
-            model_kwargs["labels"] = concatenated_batch["concatenated_labels"]
-            model_kwargs["decoder_input_ids"] = concatenated_batch.pop("concatenated_decoder_input_ids", None)
+        # if self.is_encoder_decoder:
+        #     model_kwargs["labels"] = concatenated_batch["concatenated_labels"]
+        #     model_kwargs["decoder_input_ids"] = concatenated_batch.pop("concatenated_decoder_input_ids", None)
 
-        if self.is_vision_model:
-            model_kwargs["pixel_values"] = concatenated_batch["pixel_values"]
-            if "pixel_attention_mask" in concatenated_batch:
-                model_kwargs["pixel_attention_mask"] = concatenated_batch["pixel_attention_mask"]
+        # if self.is_vision_model:
+        #     model_kwargs["pixel_values"] = concatenated_batch["pixel_values"]
+        #     if "pixel_attention_mask" in concatenated_batch:
+        #         model_kwargs["pixel_attention_mask"] = concatenated_batch["pixel_attention_mask"]
 
-        if self.aux_loss_enabled:
-            model_kwargs["output_router_logits"] = True
+        # if self.aux_loss_enabled:
+        #     model_kwargs["output_router_logits"] = True
 
         outputs = model(
-            concatenated_batch["concatenated_input_ids"],
-            attention_mask=concatenated_batch["concatenated_attention_mask"],
+            concatenated_batch["completion_input_ids"],
+            attention_mask=concatenated_batch["completion_attention_mask"],
             use_cache=False,
             **model_kwargs,
         )
@@ -337,7 +344,7 @@ class MyDPOTrainer(DPOTrainer):
         all_logps, size_completion = self.get_batch_logps(
             all_logits,
             concatenated_batch["concatenated_labels"],
-            # average_log_prob=self.loss_type == "ipo",
+            # average_log_prob=self.args.loss_type == "ipo",
             is_encoder_decoder=self.is_encoder_decoder,
             label_pad_token_id=self.label_pad_token_id,
         )
@@ -359,7 +366,7 @@ class MyDPOTrainer(DPOTrainer):
         labels = concatenated_batch["concatenated_labels"].clone()
         nll_loss = cross_entropy_loss(all_logits[:len_chosen], labels[:len_chosen])
 
-        if self.loss_type == "ipo":
+        if self.args.loss_type == "ipo":
             all_logps = all_logps / size_completion
 
         chosen_logps = all_logps[:len_chosen]
@@ -455,14 +462,15 @@ class MyDPOTrainer(DPOTrainer):
         model: Union[PreTrainedModel, nn.Module],
         inputs: Dict[str, Union[torch.Tensor, Any]],
         return_outputs=False,
+        num_items_in_batch=None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        if not self.use_dpo_data_collator:
-            warnings.warn(
-                "compute_loss is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
-                "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
-            )
+        # if not self.use_dpo_data_collator:
+        #     warnings.warn(
+        #         "compute_loss is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
+        #         "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
+        #     )
 
-        compute_loss_context_manager = amp.autocast(self.args.device)
+        compute_loss_context_manager = amp.autocast(self.args.device.type)
 
         with compute_loss_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
@@ -484,18 +492,18 @@ class MyDPOTrainer(DPOTrainer):
         prediction_loss_only: bool,
         ignore_keys: Optional[List[str]] = None,
     ):
-        if not self.use_dpo_data_collator:
-            warnings.warn(
-                "prediction_step is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
-                "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
-            )
+        # if not self.use_dpo_data_collator:
+        #     warnings.warn(
+        #         "prediction_step is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
+        #         "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
+        #     )
         if ignore_keys is None:
             if hasattr(model, "config"):
                 ignore_keys = getattr(model.config, "keys_to_ignore_at_inference", [])
             else:
                 ignore_keys = []
 
-        prediction_context_manager = amp.autocast(self.args.device)
+        prediction_context_manager = amp.autocast(self.args.device.type)
 
         with torch.no_grad(), prediction_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
