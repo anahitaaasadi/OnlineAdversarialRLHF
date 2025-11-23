@@ -25,10 +25,15 @@ rm_batch_size: 8
 
 # ===== DPOConfig fields (from trl) =====
 output_dir: "checkpoints/dpo_run"
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  "use_reentrant": false
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-num_train_epochs: 1
+num_train_epochs: 2
 learning_rate: 5e-7
+max_grad_norm: 0.5
 beta: 0.1
 max_length: 2048
 max_prompt_length: 1024

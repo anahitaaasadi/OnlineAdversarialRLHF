@@ -93,3 +93,10 @@ python main.py \
     --flip_rate 0.2 \
     --margin_tau 0.1 \
     --device cuda:0
+```
+
+## How to run DPO.py
+
+```
+accelerate launch --config_file ds_zero3.yaml DPO.py config.yaml
+```
