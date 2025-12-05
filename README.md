@@ -97,6 +97,14 @@ python main.py \
 
 ## How to run DPO.py
 
+Run DPO without any corruptions
+
 ```
-accelerate launch --config_file ds_zero3.yaml DPO.py config.yaml
+accelerate launch --config_file ds_zero3.yaml DPO.py config_no_corruption.yaml
+```
+
+Run DPO with advesarial corruptions
+
+```
+accelerate launch --config_file ds_zero3.yaml DPO.py config_corruption.yaml
 ```

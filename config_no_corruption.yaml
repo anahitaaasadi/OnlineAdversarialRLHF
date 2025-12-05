@@ -14,6 +14,7 @@ choose_type: "max_random"
 ignore_bias_buffers: false
 eot_token: "<|eot_id|>"
 len_penalty: 0.0
+corrupt_preferences: false
 
 # ===== PreferenceSamplerConfig-related fields =====
 samples_drawn_size: 20
@@ -25,6 +26,7 @@ rm_batch_size: 8
 
 # ===== DPOConfig fields (from trl) =====
 output_dir: "checkpoints/dpo_run"
+eval_strategy: 'steps'
 gradient_accumulation_steps: 2
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:

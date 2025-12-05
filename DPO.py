@@ -41,18 +41,41 @@ class ScriptArguments:
     ref_gpu_utlization: float = field(default=0.5)
     rm_batch_size: int = field(default=8)
 
+    # Corruption Params
+    corrupt_preferences: bool = field(default=True)
+    corruption_percentage: float = field(default=0.2)
+    corruption_seed: int = field(default=42)
+
+
+    def __post_init__(self):
+        if self.corrupt_preferences:
+            if self.corrupt_preferences > 1.0 or self.corrupt_preferences < 0.0:
+                self.corrupt_preferences = 0.2  
+
+
+def corrupt_data(pos: list, neg: list, prompts: list, margin: list, args: ScriptArguments) -> tuple[list, list, list, list]:
+    """
+    Advaserially flip labels of some percentage of examples.
+    """
+    n = len(prompts)
+    corrupted_idx = int(args.corruption_percentage * n)
+    np.random.seed(args.corruption_seed)
+    permuted_indices = np.random.permutation(np.arange(n))[:corrupted_idx]
+
+    for idx in permuted_indices:
+        pos[idx], neg[idx], margin[idx] = neg[idx], pos[idx], -margin[idx]
+
+    return pos, neg, prompts, margin
+
 
 def prepare_data(
-    # data_dir: str,
+    args: ScriptArguments,
     samples_preference_pair: dict,
     sanity_check: bool = False,
     margin_scale=1,
-    # choose_type="random",
     eot_token="",
-    # length_penalty=0,
+    is_train=True
 ) -> Dataset:
-    # ds = load_dataset("json", data_files=data_dir, split="train")
-    # print(ds)
 
     pos = []
     neg = []
@@ -68,6 +91,9 @@ def prepare_data(
         pos.append(best_resp)
         neg.append(worst_resp)
         margin.append((best_reward - worst_reward) * margin_scale)
+
+    if args.corrupt_preferences and is_train:
+        pos, neg, prompts, margin = corrupt_data(pos, neg, prompts, margin, args)
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
@@ -140,7 +166,7 @@ if __name__ == "__main__":
 
     import json
 
-    # TODO: Sampling needs to be done outside this script. We are using accelerate to do DPO training.
+    # TODO: Sampling needs to be done outside this script. We are using accelerate to do DPO training
 
     # outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
     # pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
@@ -154,20 +180,28 @@ if __name__ == "__main__":
     eval_pref_pairs = {k: v for (k, v) in items[2000:]}
 
     train_dataset = prepare_data(
+        args=script_args,
         samples_preference_pair=train_pref_pairs,
         sanity_check=script_args.sanity_check,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
+        is_train=True
     )
     
     eval_dataset = prepare_data(
+        args=script_args,
         samples_preference_pair=eval_pref_pairs,
         sanity_check=True,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
+        is_train=False
     )
     
     # eval_dataset = train_dataset.select(range(min(len(train_dataset), 100)))
+
+    os.environ["WANDB_MODE"] = "offline"
+    os.environ["WANDB_DIR"] = os.getcwd()
+    os.environ["WANDB_PROJECT"] = "dpo_offline_run"
 
     dpo_trainer = DPOTrainer(
         model,
