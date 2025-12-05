@@ -1,6 +1,5 @@
 from tqdm import tqdm
 from IHL_data_module import TextDatasetQA, get_model_identifiers_from_yaml, custom_data_collator
-from unlearn_author.IHL_data_module import get_batch_loss
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import os, hydra
@@ -8,6 +7,7 @@ import json
 from pathlib import Path
 
 from IHL_utils import get_model_identifiers_from_yaml
+from IHL_data_module import get_batch_loss
 
 
 @hydra.main(version_base=None, config_path="config", config_name="eval_augmentation")

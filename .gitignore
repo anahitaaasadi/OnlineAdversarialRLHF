@@ -10,3 +10,6 @@ checkpoints/
 .DS_Store
 rlhf/
 rlhf2/
+
+llm_weights/
+outputs/

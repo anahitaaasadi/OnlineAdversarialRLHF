@@ -68,11 +68,11 @@ def eval_perturbation_ratio(eval_dataloader, perturb_dataloader, model):
 
 
         # zip index and each stat into a dict
-        perturb_loss_per_token = dict(zip(indices.cpu().numpy().tolist(), perturb_loss_per_token.cpu().numpy().tolist()))
-        gt_loss_per_token = dict(zip(indices.cpu().numpy().tolist(), gt_loss_per_token.cpu().numpy().tolist()))
-        truth_ratio = dict(zip(indices.cpu().numpy().tolist(), truth_ratio.cpu().numpy().tolist()))
-        gt_loss = dict(zip(indices.cpu().numpy().tolist(), gt_loss.cpu().numpy().tolist()))
-        perturb_loss = dict(zip(indices.cpu().numpy().tolist(), perturb_loss.cpu().numpy().tolist()))
+        perturb_loss_per_token = dict(zip(indices.cpu().numpy().tolist(), perturb_loss_per_token.float().cpu().numpy().tolist()))
+        gt_loss_per_token = dict(zip(indices.cpu().numpy().tolist(), gt_loss_per_token.float().cpu().numpy().tolist()))
+        truth_ratio = dict(zip(indices.cpu().numpy().tolist(), truth_ratio.float().cpu().numpy().tolist()))
+        gt_loss = dict(zip(indices.cpu().numpy().tolist(), gt_loss.float().cpu().numpy().tolist()))
+        perturb_loss = dict(zip(indices.cpu().numpy().tolist(), perturb_loss.float().cpu().numpy().tolist()))
         num_token_gt = dict(zip(indices.cpu().numpy().tolist(), num_token_gt.cpu().numpy().tolist()))
         num_token_perturb = dict(zip(indices.cpu().numpy().tolist(), num_token_perturb.cpu().numpy().tolist()))
 
@@ -223,8 +223,8 @@ def get_all_evals(
         if 'generated_text' not in eval_logs:
             eval_logs['generated_text'] = {}
         # print(gt_loss.shape, num_token_gt.shape)
-        eval_logs['avg_gt_loss'].update(dict(zip(indices.cpu().numpy().tolist(), gt_loss_per_token.cpu().numpy().tolist())))
-        eval_logs['gt_loss'].update(dict(zip(indices.cpu().numpy().tolist(), gt_loss.cpu().numpy().tolist())))
+        eval_logs['avg_gt_loss'].update(dict(zip(indices.cpu().numpy().tolist(), gt_loss_per_token.float().cpu().numpy().tolist())))
+        eval_logs['gt_loss'].update(dict(zip(indices.cpu().numpy().tolist(), gt_loss.float().cpu().numpy().tolist())))
         eval_logs['num_token_gt'].update(dict(zip(indices.cpu().numpy().tolist(), num_token_gt.cpu().numpy().tolist())))
         eval_logs['generated_text'].update(dict(zip(indices.cpu().numpy().tolist(), zip(input_string, gen_output,gt))))
 
@@ -256,6 +256,8 @@ def main(cfg):
     if os.environ.get('LOCAL_RANK') is not None:
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
+    else:
+        device_map = 'auto'
 
     os.environ["WANDB_DISABLED"] = "true"
     model_cfg = get_model_identifiers_from_yaml(cfg.model_family)
@@ -277,38 +279,44 @@ def main(cfg):
             # do thing
             if cfg.use_pretrained:
                 print(f"Loading pretrained from {model_id}")
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_id, 
-                    config=config, 
-                    use_flash_attention_2=model_cfg["flash_attention2"]=="true", 
-                    torch_dtype=torch.bfloat16, 
-                    trust_remote_code = True, 
-                    device_map=device_map
-                )
+                model_kwargs = {
+                    "config": config,
+                    "torch_dtype": torch.bfloat16,
+                    "trust_remote_code": True,
+                    "device_map": device_map
+                }
+                if model_cfg["flash_attention2"] == "true":
+                    model_kwargs["use_flash_attention_2"] = True
+                
+                model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
             else:
                 if 'grad_diff_hinge_flora' in cfg.model_path:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        cfg.base_model_path, 
-                        config=config, 
-                        use_flash_attention_2=model_cfg["flash_attention2"]=="true", 
-                        torch_dtype=torch.bfloat16, 
-                        trust_remote_code=True, 
-                        device_map=device_map
-                    )
+                    base_model_kwargs = {
+                        "config": config,
+                        "torch_dtype": torch.bfloat16,
+                        "trust_remote_code": True,
+                        "device_map": device_map
+                    }
+                    if model_cfg["flash_attention2"] == "true":
+                        base_model_kwargs["use_flash_attention_2"] = True
+                    
+                    model = AutoModelForCausalLM.from_pretrained(cfg.base_model_path, **base_model_kwargs)
                     model = PeftModel.from_pretrained(
                         model,
                         cfg.model_path
                     )
                     model = model.merge_and_unload()
                 else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        cfg.model_path, 
-                        config=config, 
-                        use_flash_attention_2=model_cfg["flash_attention2"]=="true", 
-                        torch_dtype=torch.bfloat16, 
-                        trust_remote_code=True, 
-                        device_map=device_map
-                    )
+                    model_path_kwargs = {
+                        "config": config,
+                        "torch_dtype": torch.bfloat16,
+                        "trust_remote_code": True,
+                        "device_map": device_map
+                    }
+                    if model_cfg["flash_attention2"] == "true":
+                        model_path_kwargs["use_flash_attention_2"] = True
+                    
+                    model = AutoModelForCausalLM.from_pretrained(cfg.model_path, **model_path_kwargs)
         except Exception as e:
             print(e)
             continue
@@ -434,7 +442,7 @@ def run_generation(cfg, batch, model, tokenizer):
     left_pad_tokenizer.pad_token_id = left_pad_tokenizer.eos_token_id
 
 
-    inputs = left_pad_tokenizer.batch_encode_plus(
+    inputs = left_pad_tokenizer(
         input_strings, 
         add_special_tokens=True, 
         return_tensors='pt', 
