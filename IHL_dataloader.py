@@ -12,19 +12,24 @@ import numpy as np
 from scipy.stats import ks_2samp, hmean
 import csv 
 from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
-from torchmetrics.classification import MulticlassHingeLoss
-from torchmetrics.utilities.data import to_onehot
-from torchmetrics.metric import Metric
-from torchmetrics.functional.classification.confusion_matrix import _multiclass_confusion_matrix_format
-from torchmetrics.functional.classification.hinge import _multiclass_hinge_loss_arg_validation, _multiclass_hinge_loss_tensor_validation, _hinge_loss_compute
 
-from IHL_module import get_batch_loss 
+from IHL_data_module import get_batch_loss 
 from IHL_utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
 from IHL_evaluate import get_dataloader, get_all_evals
 
 def printll(name, inp):
     #print list with 4 decimal for each item
     print(name, [round(x, 4) for x in inp])
+
+from torchmetrics.classification import MulticlassHingeLoss
+from torchmetrics.utilities.data import to_onehot
+from torchmetrics.metric import Metric
+from torchmetrics.functional.classification.confusion_matrix import _multiclass_confusion_matrix_format
+from torchmetrics.functional.classification.hinge import (
+    _multiclass_hinge_loss_arg_validation, 
+    _multiclass_hinge_loss_tensor_validation,
+    _hinge_loss_compute
+)
 
 def _custom_multiclass_hinge_loss_update(
     preds,
@@ -79,7 +84,7 @@ def multiclass_hinge_loss(
     return _hinge_loss_compute(measures, total)
 
 class CustomTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         input_ids, labels, attention_mask = inputs
         # forward pass
         outputs = model(input_ids,labels=labels, attention_mask=attention_mask)
@@ -154,7 +159,7 @@ class CustomTrainerForgetting(Trainer):
         return model
     
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         
         if self.loss_type == "grad_ascent":
             

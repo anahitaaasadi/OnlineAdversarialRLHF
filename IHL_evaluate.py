@@ -1,5 +1,4 @@
 from tqdm import tqdm
-from IHL.IHL_module import TextDatasetQA, custom_data_collator, get_batch_loss, custom_data_collator_with_indices
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, set_seed
 from peft import PeftModel, PeftConfig
@@ -8,12 +7,14 @@ import evaluate
 import json
 from pathlib import Path
 from rouge_score import rouge_scorer
-from IHL.IHL_utils import get_model_identifiers_from_yaml, get_model_utility, get_forget_quality
 import torch.nn as nn
 import csv 
 import numpy as np 
 from functools import reduce
 import random
+
+from IHL_utils import get_model_identifiers_from_yaml, get_model_utility, get_forget_quality
+from IHL_module import TextDatasetQA, custom_data_collator, get_batch_loss, custom_data_collator_with_indices
 
 def eval_perturbation_ratio(eval_dataloader, perturb_dataloader, model):
     eval_logs = {}

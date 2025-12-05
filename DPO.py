@@ -145,7 +145,7 @@ if __name__ == "__main__":
     # outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
     # pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
 
-    with open('20k_responses/preference_samples.json') as f:
+    with open('preference_samples.json') as f:
         pref_pairs = json.load(f)
 
     items = list(pref_pairs.items())[:2100]

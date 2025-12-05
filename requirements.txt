@@ -15,3 +15,11 @@ pyyaml
 rouge-score
 evaluate
 hydra-core
+
+git+https://github.com/huggingface/transformers
+omegaconf
+rouge_score
+matplotlib
+einops
+packaging
+ninja
