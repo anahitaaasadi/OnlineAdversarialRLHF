@@ -100,7 +100,7 @@ def main(cfg):
         deepspeed='config/ds_config.json',
         weight_decay = cfg.weight_decay,
         eval_steps = steps_per_epoch,
-        evaluation_strategy = "steps" if cfg.eval_while_train else "no",
+        eval_strategy = "steps" if cfg.eval_while_train else "no",
         seed=cfg.seed
     )
     
@@ -109,11 +109,11 @@ def main(cfg):
     import re
     path_found = False
     for file in os.listdir(cfg.model_path):
-        if re.search("pytorch.*\.bin", file):
+        if re.search(r"pytorch.*\.bin", file):
             path_found = True
             break
         
-        if re.search("model-*\.safetensors", file):
+        if re.search(r"model.*\.safetensors", file):
             path_found = True
             break
 
@@ -123,21 +123,31 @@ def main(cfg):
         config = AutoConfig.from_pretrained(model_id)
 
         print("Loading from checkpoint")
+        model_kwargs = {
+            "config": config,
+            "torch_dtype": torch.bfloat16,
+            "trust_remote_code": True
+        }
+        if model_cfg["flash_attention2"] == "true":
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_path, 
-            config=config, 
-            use_flash_attention_2=model_cfg["flash_attention2"]=="true", 
-            torch_dtype=torch.bfloat16, 
-            trust_remote_code = True
+            **model_kwargs
         )
 
     else:
         print("Loading after merge and unload")
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": device_map
+        }
+        if model_cfg["flash_attention2"] == "true":
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
         model = AutoModelForCausalLM.from_pretrained(
             model_id, 
-            use_flash_attention_2=model_cfg["flash_attention2"]=="true", 
-            torch_dtype=torch.bfloat16, 
-            device_map=device_map
+            **model_kwargs
         )
         #now use the checkpoint to add the LoRA modules
         model = PeftModel.from_pretrained(model, model_id = cfg.model_path)
@@ -156,7 +166,6 @@ def main(cfg):
     
     trainer = CustomTrainerForgetting(
         model=model,
-        tokenizer=tokenizer,
         train_dataset=torch_format_dataset,
         eval_dataset=torch_format_dataset,
         compute_metrics=None, # the callback for computing metrics, None in this case since you're doing it in your callback
@@ -173,6 +182,9 @@ def main(cfg):
         grad_diff_coeff=cfg.grad_diff_coeff,
         KL_coeff=cfg.KL_coeff,
     )
+    
+    # Set tokenizer separately
+    trainer.tokenizer = tokenizer
     
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
     

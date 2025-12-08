@@ -159,7 +159,7 @@ def main(cfg):
             "ignore_mismatched_sizes": True
         }
         if model_cfg["flash_attention2"] == "true":
-            model_kwargs["use_flash_attention_2"] = True
+            model_kwargs["attn_implementation"] = "flash_attention_2"
         
         model = AutoModelForCausalLM.from_pretrained(cfg.model_path, **model_kwargs)
         if cfg.forget_loss == "KL" or "npo" in cfg.forget_loss:
@@ -170,7 +170,7 @@ def main(cfg):
                 "ignore_mismatched_sizes": True
             }
             if model_cfg["flash_attention2"] == "true":
-                oracle_kwargs["use_flash_attention_2"] = True
+                oracle_kwargs["attn_implementation"] = "flash_attention_2"
             
             oracle_model = AutoModelForCausalLM.from_pretrained(cfg.model_path, **oracle_kwargs)
 
@@ -181,7 +181,7 @@ def main(cfg):
             "device_map": device_map
         }
         if model_cfg["flash_attention2"] == "true":
-            merge_kwargs["use_flash_attention_2"] = True
+            merge_kwargs["attn_implementation"] = "flash_attention_2"
         
         model = AutoModelForCausalLM.from_pretrained(model_id, **merge_kwargs)
         #now use the checkpoint to add the LoRA modules
@@ -249,7 +249,6 @@ def main(cfg):
 
     if cfg.importance_file: # if using FILA
 
-        cfg.save_dir = cfg.save_dir.replace(cfg.forget_loss, cfg.forget_loss+"_FILA")
         print(f'loading importance file from {cfg.importance_file}')
         imp_file = torch.load(cfg.importance_file, map_location='cpu')
         
@@ -258,22 +257,30 @@ def main(cfg):
         importance_f = imp_file['importance_f']
         importance_r = imp_file['importance_r']
         
+        print(f"Loaded importance file with {len(importance_f)} layers")
+        print(f"Forget count: {f_cnt}, Retain count: {r_cnt}")
+        
         importances = {n: torch.div(importance_f[n]/f_cnt, 1e-5+(importance_r[n]/r_cnt)) for n in importance_f.keys()}
 
+        initialized_layers = 0
         for old_name, importance in importances.items():
 
             if not any([target_name in old_name for target_name in lora_targets]):
                 continue
             name = old_name.replace("module.", '')
-            lora_A = 'base_model.model.'+name.replace(".weight", '')+'.lora_A'
-            lora_B = 'base_model.model.'+name.replace(".weight", '')+'.lora_B'
-            base_layer = 'base_model.model.'+name.replace(".weight", '')+'.base_layer'
-            scaling = 'base_model.model.'+name.replace(".weight", '')+'.scaling'
+            lora_A_path = 'base_model.model.'+name.replace(".weight", '')+'.lora_A.default'
+            lora_B_path = 'base_model.model.'+name.replace(".weight", '')+'.lora_B.default'
+            base_layer_path = 'base_model.model.'+name.replace(".weight", '')+'.base_layer'
+            scaling_path = 'base_model.model.'+name.replace(".weight", '')+'.scaling'
 
-            lora_A = get_module_by_name(model, lora_A)
-            lora_B = get_module_by_name(model, lora_B)
-            base_layer = get_module_by_name(model, base_layer)
-            scaling = get_module_by_name(model, scaling)
+            try:
+                lora_A = get_module_by_name(model, lora_A_path)
+                lora_B = get_module_by_name(model, lora_B_path)
+                base_layer = get_module_by_name(model, base_layer_path)
+                scaling = get_module_by_name(model, scaling_path)
+            except AttributeError as e:
+                print(f"Warning: Could not access module {name}: {e}")
+                continue
 
             orig_shape = base_layer.weight.shape
             W = base_layer.weight.data.reshape(orig_shape)
@@ -284,15 +291,19 @@ def main(cfg):
             row_importance = importance.sum(dim=1).sqrt().to(W.device) # row-wise sum
             U, S, V = torch.svd_lowrank(row_importance[:,None] * W, q=cfg.LoRA.r)
 
-            S = S / scaling['default']
+            S = S / scaling
 
             new_lora_A = (V * torch.sqrt(S)).t()
             new_lora_B = (1/(row_importance+1e-5))[:,None] * (U * torch.sqrt(S))
-            new_residual = base_layer.weight.data.reshape(orig_shape) - scaling['default'] * new_lora_B @ new_lora_A
+            new_residual = base_layer.weight.data.reshape(orig_shape) - scaling * new_lora_B @ new_lora_A
 
-            lora_A['default'].weight.data = new_lora_A.contiguous().to(dtype)
-            lora_B['default'].weight.data = new_lora_B.contiguous().to(dtype)
+            lora_A.weight.data = new_lora_A.contiguous().to(dtype)
+            lora_B.weight.data = new_lora_B.contiguous().to(dtype)
             base_layer.weight.data = new_residual.contiguous().to(dtype)
+            
+            initialized_layers += 1
+        
+        print(f"FILA: Initialized {initialized_layers} LoRA layers with importance-weighted decomposition")
     
     trainer = CustomTrainerForgetting(
         model=model,
@@ -312,6 +323,9 @@ def main(cfg):
         grad_diff_coeff=cfg.grad_diff_coeff,
         KL_coeff=cfg.KL_coeff,
     )
+    
+    # Set tokenizer separately
+    trainer.tokenizer = tokenizer
     
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
     if cfg.eval_only:
