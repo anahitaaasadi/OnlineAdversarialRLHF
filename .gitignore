@@ -13,3 +13,7 @@ rlhf2/
 
 llm_weights/
 outputs/
+wandb/
+
+data.py
+main.py

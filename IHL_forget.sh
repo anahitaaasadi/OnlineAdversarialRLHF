@@ -6,6 +6,8 @@ NUM_GPUS=$(echo $GPUS | tr ',' '\n' | wc -l)
 MODEL_FAMILY=${MODEL_FAMILY:-"phi"}
 MODEL_PATH=${MODEL_PATH:-"./llm_weights/ft_epoch5_lr0.0001_phi_forget10_wd0.01/checkpoint-62"}
 SPLIT=${SPLIT:-"forget01"}
+DATA_PATH=${DATA_PATH:-""}
+SAVE_DIR=${SAVE_DIR:-""}
 BATCH_SIZE=${BATCH_SIZE:-8}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-4}
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
@@ -19,6 +21,8 @@ CUDA_VISIBLE_DEVICES=$GPUS torchrun --nproc_per_node=$NUM_GPUS \
     model_family=$MODEL_FAMILY \
     model_path=$MODEL_PATH \
     split=$SPLIT \
+    ${DATA_PATH:+data_path=$DATA_PATH} \
+    ${SAVE_DIR:+save_dir=$SAVE_DIR} \
     batch_size=$BATCH_SIZE \
     gradient_accumulation_steps=$GRAD_ACC_STEPS \
     lr=$LEARNING_RATE \

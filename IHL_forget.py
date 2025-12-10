@@ -309,8 +309,7 @@ def main(cfg):
         model=model,
         train_dataset=torch_format_dataset,
         eval_dataset=torch_format_dataset,
-        compute_metrics=None, # the callback for computing metrics, None in this case since you're doing it in your callback
-        # callbacks=[GlobalStepDeletionCallback], 
+        compute_metrics=None,
         args=training_args,
         data_collator=custom_data_collator_forget,
         oracle_model = oracle_model,

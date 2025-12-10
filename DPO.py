@@ -45,6 +45,7 @@ class ScriptArguments:
     ref_gpu_utlization: float = field(default=0.5)
     rm_batch_size: int = field(default=8)
     sample_save_dir: str = field(default='samples')
+    calculate_uncertainty_scores: bool = field(default=False)
 
     # Corruption Params
     corrupt_preferences: bool = field(default=True)
@@ -89,21 +90,25 @@ def corrupt_scores(scores: np.ndarray, args: ScriptArguments) -> np.ndarray:
     return corrupted_scores
 
 
-def attack_mitigation(pos: list, neg: list, prompts: list, margin: list, corrupted_scores: list) -> tuple[list, list, list, list]:
+def attack_mitigation(pos: list, neg: list, prompts: list, margin: list, corrupted_scores: list) -> tuple[list, list, list, list, list]:
+    """Identify corrupted samples using uncertainty scores.
+    Returns indices of samples to forget instead of flipping labels.
+    """
     threshold = 1.01
+    corrupted_indices = []
+    
     for idx in range(len(prompts)):
         score = corrupted_scores[idx]
 
         threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) <= threshold
         inv_threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) >= 1/threshold
 
-        should_flip = threshold_bool and not inv_threshold_bool
+        should_forget = threshold_bool and not inv_threshold_bool
 
-        if should_flip:
-            pos[idx], neg[idx], margin[idx] = neg[idx], pos[idx], -margin[idx]
+        if should_forget:
+            corrupted_indices.append(idx)
 
-    return pos, neg, prompts, margin
-
+    return pos, neg, prompts, margin, corrupted_indices
 
 
 def prepare_data(
@@ -113,7 +118,8 @@ def prepare_data(
     margin_scale=1,
     eot_token="",
     is_train=True,
-    uncertainty_scores: np.ndarray | None = None
+    uncertainty_scores: np.ndarray | None = None,
+    iteration: int = 0
 ) -> Dataset:
 
     pos = []
@@ -135,8 +141,26 @@ def prepare_data(
         pos, neg, prompts, margin = corrupt_data(pos, neg, prompts, margin, args)
 
         if args.mitigate_corruption and uncertainty_scores is not None:
-            corrupted_scores = corrupt_scores(scores, args)
-            pos, neg, prompts, margin = attack_mitigation(pos, neg, prompts, margin, corrupted_scores)
+            corrupted_scores = corrupt_scores(uncertainty_scores, args)
+            pos, neg, prompts, margin, corrupted_indices = attack_mitigation(pos, neg, prompts, margin, corrupted_scores)
+            
+            # Save corrupted samples for IHL forget
+            if len(corrupted_indices) > 0:
+                corrupted_data = {
+                    "prompts": [prompts[i] for i in corrupted_indices],
+                    "chosen": [pos[i] for i in corrupted_indices],
+                    "rejected": [neg[i] for i in corrupted_indices],
+                    "indices": corrupted_indices
+                }
+                
+                forget_dir = "data/forget_samples"
+                os.makedirs(forget_dir, exist_ok=True)
+                forget_file = os.path.join(forget_dir, f"corrupted_samples_iter_{iteration}.json")
+                
+                with open(forget_file, 'w') as f:
+                    json.dump(corrupted_data, f, indent=4)
+                
+                print(f"Saved {len(corrupted_indices)} corrupted samples to {forget_file}")
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
@@ -149,7 +173,7 @@ def prepare_data(
 def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     train_samples = {}
     eval_samples = {}
-    for sample_fp in sorted([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.json')], key=os.path.getctime):
+    for sample_fp in sorted([os.path.join(args.sample_save_dir, file) for file in os.listdir(args.sample_save_dir) if file.endswith('.json')], key=os.path.getctime):
         with open(sample_fp) as fp:
             pref_pairs = list(json.load(fp).items())
             train_pref_pairs = {k: v for (k, v) in pref_pairs[:args.train_samples_drawn_size]}
@@ -161,8 +185,12 @@ def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     return train_samples, eval_samples
 
 
-def load_uncertainty_scores() -> np.ndarray:
-    fp = max([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.npz')], key=os.path.getctime)
+def load_uncertainty_scores(sample_save_dir: str) -> np.ndarray:
+    npz_files = [os.path.join(sample_save_dir, file) for file in os.listdir(sample_save_dir) if file.endswith('.npz')]
+    if not npz_files:
+        print(f"Warning: No uncertainty score files found in {sample_save_dir} directory. Returning None.")
+        return None
+    fp = max(npz_files, key=os.path.getctime)
     return np.load(fp)['arr_0']
 
 
@@ -188,7 +216,10 @@ if __name__ == "__main__":
     print(f'Mitigating attacks : {script_args.mitigate_corruption}')
 
     train_pref_pairs, eval_pref_pairs = load_data(script_args)
-    scores = load_uncertainty_scores()
+    scores = load_uncertainty_scores(script_args.sample_save_dir) if script_args.mitigate_corruption else None
+    
+    # Determine current iteration
+    iteration = n + 1
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
@@ -214,7 +245,7 @@ if __name__ == "__main__":
 
     model_ref.gradient_checkpointing_enable()
     
-    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path, trust_remote_code=True)
     if script_args.eos_padding:
         tokenizer.pad_token = tokenizer.eos_token
     else:
@@ -233,7 +264,8 @@ if __name__ == "__main__":
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
         is_train=True,
-        uncertainty_scores=scores
+        uncertainty_scores=scores,
+        iteration=iteration
     )
     
     eval_dataset = prepare_data(

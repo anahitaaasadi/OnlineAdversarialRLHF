@@ -1,0 +1,50 @@
+# Configuration for IHL forget on corrupted samples
+# This config is used when running IHL_forget.py on detected corrupted data
+
+# Model and paths will be set dynamically via environment variables
+# MODEL_PATH: set by main_process.sh
+# DATA_PATH: set by main_process.sh
+# SPLIT: set by main_process.sh
+
+model_family: "phi"
+model_path: null  # Set via MODEL_PATH env var
+data_path: null  # Set via DATA_PATH env var
+split: "corrupted"  # Will be overridden by SPLIT env var
+
+# Training parameters
+batch_size: 8
+gradient_accumulation_steps: 4
+lr: 1e-5
+num_epochs: 3  # Fewer epochs for forgetting corrupted samples
+weight_decay: 0.01
+
+# Forget method
+forget_loss: "grad_ascent"  # Use gradient ascent to forget corrupted samples
+
+# LoRA configuration
+LoRA:
+  r: 8
+  alpha: 16
+  dropout: 0.1
+  targets: "all"  # all, self_attn, or mlp
+
+# Importance file for FILA (optional)
+importance_file: ""  # Leave empty if not using FILA
+
+# Saving and evaluation
+save_model: true
+save_dir: "llm_weights/forget_corrupted"  # Will be overridden dynamically
+overwrite_dir: true
+eval_only: false
+eval_while_train: false
+
+# Other settings
+seed: 42
+ref_policy: "original"
+beta: 0.1
+npo_coeff: 0.0
+grad_diff_coeff: 0.0
+KL_coeff: 0.0
+
+eval:
+  enabled: false

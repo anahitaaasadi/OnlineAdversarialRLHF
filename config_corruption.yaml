@@ -1,7 +1,7 @@
 # ===== ScriptArguments fields =====
-ref_model: "/home/vbharg4@AD/models/LLaMA3-SFT"
-reward_model: "/home/vbharg4@AD/models/FsfairX-LLaMA3-RM-v0.1"
-train_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
+ref_model: "microsoft/phi-2"
+reward_model: "OpenAssistant/reward-model-deberta-v3-large-v2"
+train_dir: "/home/aasadi5/Codes/OnlineAdversarialRLHF/ultrafeedback_iter1"
 
 ref_device: 0
 rm_device: 1
@@ -24,11 +24,10 @@ samples_drawn_size: 2100
 train_samples_drawn_size: 2000
 num_return_sequences: 4
 generation_seed: 42
-dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
+dataset_dir: "RLHFlow/ultrafeedback_iter1"
 ref_gpu_utlization: 0.75
 rm_batch_size: 8
 sample_save_dir: 'samples/iter_DPO_corruption'
-calculate_uncertainty_scores: false
 
 # ===== DPOConfig fields (from trl) =====
 output_dir: "checkpoints/iter_DPO_corruption"
