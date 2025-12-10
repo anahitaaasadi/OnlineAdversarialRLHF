@@ -14,8 +14,10 @@ choose_type: "max_random"
 ignore_bias_buffers: false
 eot_token: "<|eot_id|>"
 len_penalty: 0.0
-corrupt_preferences: false
-mitigate_corruption: false
+corrupt_preferences: true
+corruption_percentage: 0.2
+corruption_seed: 42
+mitigate_corruption: true
 
 # ===== PreferenceSamplerConfig-related fields =====
 samples_drawn_size: 2100
@@ -25,10 +27,10 @@ generation_seed: 42
 dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 ref_gpu_utlization: 0.75
 rm_batch_size: 8
-sample_save_dir: 'samples/iter_DPO'
+sample_save_dir: 'samples/iter_DPO_mitigation'
 
 # ===== DPOConfig fields (from trl) =====
-output_dir: "checkpoints/iter_DPO"
+output_dir: "checkpoints/iter_DPO_mitigation"
 report_to: "wandb"
 eval_strategy: 'steps'
 gradient_accumulation_steps: 3
@@ -36,7 +38,7 @@ gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   "use_reentrant": false
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 2
 num_train_epochs: 2
 learning_rate: 5e-7
 max_grad_norm: 0.5

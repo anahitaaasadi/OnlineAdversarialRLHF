@@ -1,4 +1,5 @@
 import os
+import json
 import yaml
 from dataclasses import dataclass, field
 from typing import Optional
@@ -9,9 +10,11 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from DPO_alignment import H4ArgumentParser
 from trl import DPOConfig, ModelConfig, DPOTrainer
+from trl.data_utils import maybe_apply_chat_template
 # from DPO_utils import MyDPOTrainer
 
 from data import PreferenceSamplerConfig, PreferenceSampler
+from uncertainty import UncertaintyConfig, get_uncertainity_scores
 
 @dataclass
 class ScriptArguments:
@@ -34,17 +37,22 @@ class ScriptArguments:
     len_penalty: Optional[float] = field(default=0.0)
 
     # === PreferenceSamplerConfig fields ===
-    samples_drawn_size: int = field(default=20)
+    samples_drawn_size: int = field(default=2100)
+    train_samples_drawn_size: int = field(default=2000)
     num_return_sequences: int = field(default=4)
     generation_seed: Optional[int] = field(default=42)
     dataset_dir: str = field(default="RLHFlow/ultrafeedback_iter1")
     ref_gpu_utlization: float = field(default=0.5)
     rm_batch_size: int = field(default=8)
+    sample_save_dir: str = field(default='samples')
 
     # Corruption Params
     corrupt_preferences: bool = field(default=True)
     corruption_percentage: float = field(default=0.2)
     corruption_seed: int = field(default=42)
+
+    # Mitigation params
+    mitigate_corruption: bool = field(default=False)
 
 
     def __post_init__(self):
@@ -54,9 +62,6 @@ class ScriptArguments:
 
 
 def corrupt_data(pos: list, neg: list, prompts: list, margin: list, args: ScriptArguments) -> tuple[list, list, list, list]:
-    """
-    Advaserially flip labels of some percentage of examples.
-    """
     n = len(prompts)
     corrupted_idx = int(args.corruption_percentage * n)
     np.random.seed(args.corruption_seed)
@@ -68,13 +73,47 @@ def corrupt_data(pos: list, neg: list, prompts: list, margin: list, args: Script
     return pos, neg, prompts, margin
 
 
+def corrupt_scores(scores: np.ndarray, args: ScriptArguments) -> np.ndarray:
+    n = scores.shape[0]
+    corrupted_idx = int(args.corruption_percentage * n)
+    np.random.seed(args.corruption_seed)
+    permuted_indices = np.random.permutation(np.arange(n))[:corrupted_idx]
+    # Make deep copies.
+    accepted_scores = np.array(scores[permuted_indices, 0, :])
+    rejected_scores = np.array(scores[permuted_indices, 1, :])
+
+    corrupted_scores = np.array(scores)
+    corrupted_scores[permuted_indices, 0, :] = rejected_scores
+    corrupted_scores[permuted_indices, 1, :] = accepted_scores
+
+    return corrupted_scores
+
+
+def attack_mitigation(pos: list, neg: list, prompts: list, margin: list, corrupted_scores: list) -> tuple[list, list, list, list]:
+    threshold = 1.01
+    for idx in range(len(prompts)):
+        score = corrupted_scores[idx]
+
+        threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) <= threshold
+        inv_threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) >= 1/threshold
+
+        should_flip = threshold_bool and not inv_threshold_bool
+
+        if should_flip:
+            pos[idx], neg[idx], margin[idx] = neg[idx], pos[idx], -margin[idx]
+
+    return pos, neg, prompts, margin
+
+
+
 def prepare_data(
     args: ScriptArguments,
     samples_preference_pair: dict,
     sanity_check: bool = False,
     margin_scale=1,
     eot_token="",
-    is_train=True
+    is_train=True,
+    uncertainty_scores: np.ndarray | None = None
 ) -> Dataset:
 
     pos = []
@@ -94,6 +133,10 @@ def prepare_data(
 
     if args.corrupt_preferences and is_train:
         pos, neg, prompts, margin = corrupt_data(pos, neg, prompts, margin, args)
+
+        if args.mitigate_corruption and uncertainty_scores is not None:
+            corrupted_scores = corrupt_scores(scores, args)
+            pos, neg, prompts, margin = attack_mitigation(pos, neg, prompts, margin, corrupted_scores)
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
@@ -101,6 +144,26 @@ def prepare_data(
         dataset = dataset.select(range(min(len(dataset), 100)))
 
     return dataset
+
+
+def load_data(args: ScriptArguments) -> tuple[dict, dict]:
+    train_samples = {}
+    eval_samples = {}
+    for sample_fp in sorted([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.json')], key=os.path.getctime):
+        with open(sample_fp) as fp:
+            pref_pairs = list(json.load(fp).items())
+            train_pref_pairs = {k: v for (k, v) in pref_pairs[:args.train_samples_drawn_size]}
+            eval_pref_pairs = {k: v for (k, v) in pref_pairs[args.train_samples_drawn_size:]}
+            train_samples = train_samples | train_pref_pairs
+            eval_samples = eval_samples | eval_pref_pairs
+
+
+    return train_samples, eval_samples
+
+
+def load_uncertainty_scores() -> np.ndarray:
+    fp = max([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.npz')], key=os.path.getctime)
+    return np.load(fp)['arr_0']
 
 
 if __name__ == "__main__":
@@ -112,11 +175,25 @@ if __name__ == "__main__":
     if model_config.model_name_or_path is None:
             model_config.model_name_or_path = script_args.ref_model
 
+    if os.path.exists(training_args.output_dir):
+        final_checkpoints_path = [os.path.join(training_args.output_dir, file) for file in os.listdir(training_args.output_dir) if file.startswith('final_checkpoint_')]
+        n = len(final_checkpoints_path)
+
+        if n > 0:
+            model_config.model_name_or_path = max(final_checkpoints_path, key=os.path.getctime)
+    else:
+        n = 0
+
+    print(f'Loading model from {model_config.model_name_or_path}')
+    print(f'Mitigating attacks : {script_args.mitigate_corruption}')
+
+    train_pref_pairs, eval_pref_pairs = load_data(script_args)
+    scores = load_uncertainty_scores()
+
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         attn_implementation="flash_attention_2",
         dtype=torch.float16,)
-    # ).to(script_args.device)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
@@ -134,7 +211,6 @@ if __name__ == "__main__":
         ref_name,
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",)
-    # ).to(script_args.device)
 
     model_ref.gradient_checkpointing_enable()
     
@@ -149,35 +225,6 @@ if __name__ == "__main__":
         model_ref.config.pad_token_id = tokenizer.pad_token_id
         model.resize_token_embeddings(len(tokenizer))
         model_ref.resize_token_embeddings(len(tokenizer))
-    
-    pref_config = PreferenceSamplerConfig(
-        samples_drawn_size=script_args.samples_drawn_size,
-        num_return_sequences=script_args.num_return_sequences,
-        generation_seed=script_args.generation_seed,
-        dataset_dir=script_args.dataset_dir,
-        ref_model_path=script_args.ref_model,
-        ref_device=script_args.ref_device,
-        ref_gpu_utlization=script_args.ref_gpu_utlization,
-        rm_path=script_args.reward_model,
-        rm_batch_size=script_args.rm_batch_size,
-        rm_device=script_args.rm_device,
-    )
-    pref_sampler = PreferenceSampler(config=pref_config)
-
-    import json
-
-    # TODO: Sampling needs to be done outside this script. We are using accelerate to do DPO training
-
-    # outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
-    # pref_pairs = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
-
-    with open('preference_samples.json') as f:
-        pref_pairs = json.load(f)
-
-    items = list(pref_pairs.items())[:2100]
-
-    train_pref_pairs = {k: v for (k, v) in items[:2000]}
-    eval_pref_pairs = {k: v for (k, v) in items[2000:]}
 
     train_dataset = prepare_data(
         args=script_args,
@@ -185,7 +232,8 @@ if __name__ == "__main__":
         sanity_check=script_args.sanity_check,
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
-        is_train=True
+        is_train=True,
+        uncertainty_scores=scores
     )
     
     eval_dataset = prepare_data(
@@ -196,12 +244,10 @@ if __name__ == "__main__":
         eot_token=script_args.eot_token,
         is_train=False
     )
-    
-    # eval_dataset = train_dataset.select(range(min(len(train_dataset), 100)))
 
     os.environ["WANDB_MODE"] = "offline"
     os.environ["WANDB_DIR"] = os.getcwd()
-    os.environ["WANDB_PROJECT"] = "dpo_offline_run"
+    os.environ["WANDB_PROJECT"] = "iter_DPO"
 
     dpo_trainer = DPOTrainer(
         model,
@@ -210,14 +256,15 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer
-        # max_length=training_args.max_length,
-        # max_prompt_length=training_args.max_prompt_length,
-        # loss_type=training_args.loss_type,
     )
     print("begin to train")
 
     dpo_trainer.train()
     dpo_trainer.save_model(training_args.output_dir)
 
-    output_dir = os.path.join(training_args.output_dir, "final_checkpoint")
+    output_dir = os.path.join(training_args.output_dir, f"final_checkpoint_{n + 1}")
     dpo_trainer.model.save_pretrained(output_dir)
+    dpo_trainer.processing_class.save_pretrained(output_dir)
+
+    with open(f'log_history_{n + 1}.json', mode='w') as f:
+        json.dump(dpo_trainer.state.log_history, fp=f, indent=4)

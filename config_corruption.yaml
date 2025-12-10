@@ -1,7 +1,7 @@
 # ===== ScriptArguments fields =====
-ref_model: "RLHFlow/LLaMA3-SFT"
-reward_model: "sfairXC/FsfairX-LLaMA3-RM-v0.1"
-train_dir: "RLHFlow/ultrafeedback_iter1"
+ref_model: "/home/vbharg4@AD/models/LLaMA3-SFT"
+reward_model: "/home/vbharg4@AD/models/FsfairX-LLaMA3-RM-v0.1"
+train_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 
 ref_device: 0
 rm_device: 1
@@ -17,24 +17,28 @@ len_penalty: 0.0
 corrupt_preferences: true
 corruption_percentage: 0.2
 corruption_seed: 42
+mitigate_corruption: false
 
 # ===== PreferenceSamplerConfig-related fields =====
-samples_drawn_size: 20
+samples_drawn_size: 2100
+train_samples_drawn_size: 2000
 num_return_sequences: 4
 generation_seed: 42
-dataset_dir: "RLHFlow/ultrafeedback_iter1"
-ref_gpu_utlization: 0.5
+dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
+ref_gpu_utlization: 0.75
 rm_batch_size: 8
+sample_save_dir: 'samples/iter_DPO_corruption'
 
 # ===== DPOConfig fields (from trl) =====
-output_dir: "checkpoints/dpo_run_corrupt"
+output_dir: "checkpoints/iter_DPO_corruption"
+report_to: "wandb"
 eval_strategy: 'steps'
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 3
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   "use_reentrant": false
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 2
 num_train_epochs: 2
 learning_rate: 5e-7
 max_grad_norm: 0.5
@@ -45,7 +49,6 @@ loss_type: "sigmoid"
 save_strategy: "no"
 remove_unused_columns: false
 logging_steps: 10
-report_to: []
 
 # ===== ModelConfig fields (from trl) =====
 model_name_or_path: null
