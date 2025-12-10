@@ -28,6 +28,7 @@ dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 ref_gpu_utlization: 0.75
 rm_batch_size: 8
 sample_save_dir: 'samples/iter_DPO_corruption'
+calculate_uncertainty_scores: false
 
 # ===== DPOConfig fields (from trl) =====
 output_dir: "checkpoints/iter_DPO_corruption"

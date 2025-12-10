@@ -24,13 +24,14 @@ class PreferenceSamplerConfig:
     num_return_sequences: int = field(default=4, metadata={'help': 'How many samples are generated per policy before rejection sampling'})
     generation_seed: int | None = field(default=42, metadata={'help': 'Sample generation seed'})
     dataset_dir: str = field(default='ultrafeedback_iter1', metadata={'help': 'Dataset from which the prompts are sampled.'})
-    ref_model_path: str = field(default='LLaMA3-SFT', metadata={'help': 'Policy being trained.'})
+    ref_model: str = field(default='LLaMA3-SFT', metadata={'help': 'Policy being trained.'})
     ref_device: int = field(default=0, metadata={'help': 'GPU index where the policy model is loaded into.'})
     ref_gpu_utlization: float = field(default=0.75, metadata={'help': 'How much GPU should vLLM occupy between 0.0 and 1.0. Higher is better for faster inference at scale.'})
-    rm_path: str = field(default='FsfairX-LLaMA3-RM-v0.1', metadata={'help': 'Reward model which simulates human feedback.'})
+    reward_model: str = field(default='FsfairX-LLaMA3-RM-v0.1', metadata={'help': 'Reward model which simulates human feedback.'})
     # rm_gpu_utlization: float = field(default=0.75, metadata={'help': 'How much GPU should vLLM occupy between 0.0 and 1.0. Higher is better for faster inference at scale.'})
     rm_batch_size: int = field(default=2 * 4, metadata={'help': 'To speedup the reward calculating for all the samples created.'})
     rm_device: int = field(default=0, metadata={'help': 'GPU index where the reward model is loaded into.'})
+    calculate_uncertainty_scores: bool = field(default=False, metadata={'help': 'Calculate uncertainty scores for all previouis and current generations.'})
     sample_save_dir: str = field(default='samples', metadata={'help': 'relative file path to store the samples.'})
 
 
@@ -44,11 +45,12 @@ class PreferenceSampler:
         self.config = config
         dataset = load_dataset(config.dataset_dir)
         samples_drawn_size = min(config.samples_drawn_size, 20000)
+        # dataset = dataset['train'].take(samples_drawn_size)
         dataset = dataset['train'].select(range(n * samples_drawn_size, (n + 1) * samples_drawn_size))
         self.dataset = dataset
 
-        self.ref_model_path = config.ref_model_path
-        self.rm_path = config.rm_path
+        self.ref_model_path = config.ref_model
+        self.rm_path = config.reward_model
 
     def generate_responses(self) -> tuple[list[RequestOutput], list[RequestOutput]]:
         ref_tokenizer = AutoTokenizer.from_pretrained(self.ref_model_path)
@@ -233,12 +235,12 @@ if __name__ == '__main__':
     ref_model_path = os.path.join(MODEL_DIR, 'LLaMA3-SFT')
     reward_model_path = os.path.join(MODEL_DIR, 'FsfairX-LLaMA3-RM-v0.1')
 
-    parser = HfArgumentParser(DPOConfig)
+    parser = HfArgumentParser((DPOConfig, PreferenceSamplerConfig))
     parser.add_argument('config_file', help='DPO.py config file', default=None)
     args = parser.parse_args()
 
     if args.config_file is not None:
-        train_config, = parser.parse_yaml_file(args.config_file, allow_extra_keys=True)
+        train_config, config = parser.parse_yaml_file(args.config_file, allow_extra_keys=True)
         iter_dpo_checkpoint_path = train_config.output_dir
         os.makedirs(iter_dpo_checkpoint_path, exist_ok=True)
 
@@ -249,24 +251,23 @@ if __name__ == '__main__':
             ref_model_path = max(final_checkpoints_path, key=os.path.getctime)
     else:
         n = 0
+        config = PreferenceSamplerConfig(dataset_dir=ds_id, ref_model=ref_model_path, reward_model=reward_model_path)
 
-    config = PreferenceSamplerConfig(dataset_dir=ds_id, ref_model_path=ref_model_path, rm_path=reward_model_path)
     pref_sampler = PreferenceSampler(config=config, n=n)
+    print(f'Calculate uncertainty : {config.calculate_uncertainty_scores}')
 
     outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
     samples_preference_pair = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_1)
 
-    train_samples_preference_pair = {k: v for (k, v) in list(samples_preference_pair.items())[:config.train_samples_drawn_size]}
-
+    file_name_prefix = f'{n + 1}'
     os.makedirs('samples', exist_ok=True)
 
-    all_train_samples_preference_pair = pref_sampler.combine_with_prior_train_samples(train_samples_preference_pair)
-
-    scores = get_uncertainity_scores(all_train_samples_preference_pair, config=UncertaintyConfig(ref_model_path))
-
-    file_name_prefix = f'{n + 1}'
-
     with open(os.path.join('samples', f'{file_name_prefix}.json'), mode='w') as f:
-            json.dump(samples_preference_pair, fp=f, indent=4) 
+        json.dump(samples_preference_pair, fp=f, indent=4)
 
-    np.savez_compressed(os.path.join('samples', f'{file_name_prefix}.npz'), scores)
+    if config.calculate_uncertainty_scores:
+        train_samples_preference_pair = {k: v for (k, v) in list(samples_preference_pair.items())[:config.train_samples_drawn_size]}
+        all_train_samples_preference_pair = pref_sampler.combine_with_prior_train_samples(train_samples_preference_pair)
+
+        scores = get_uncertainity_scores(all_train_samples_preference_pair, config=UncertaintyConfig(ref_model_path))
+        np.savez_compressed(os.path.join('samples', f'{file_name_prefix}.npz'), scores)
