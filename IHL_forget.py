@@ -137,14 +137,20 @@ def main(cfg):
     #if there is a pytorch*.bin file in the model path, then load that. use regex there can be anythign in between pytorch and .bin
     import re
     path_found = False
-    for file in os.listdir(cfg.model_path):
-        if re.search(r"pytorch.*\.bin", file):
-            path_found = True
-            break
-        
-        if re.search(r"model-*\.safetensors", file):
-            path_found = True
-            break
+    
+    # Check if model_path is a local directory
+    if os.path.exists(cfg.model_path) and os.path.isdir(cfg.model_path):
+        for file in os.listdir(cfg.model_path):
+            if re.search(r"pytorch.*\.bin", file):
+                path_found = True
+                break
+            
+            if re.search(r"model-*\.safetensors", file):
+                path_found = True
+                break
+    else:
+        # It's a Hugging Face model identifier, not a local path
+        print(f"Model path '{cfg.model_path}' is not a local directory. Will load from Hugging Face.")
 
     oracle_model = None
 

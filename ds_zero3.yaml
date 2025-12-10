@@ -19,6 +19,13 @@ deepspeed_config:
     stage3_max_live_parameters: 1e9
     stage3_max_reuse_distance: 1e9
     stage3_gather_16bit_weights_on_model_save: true
+  
+  # Memory optimizations
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    synchronize_checkpoint_boundary: false
 
   # Batch size control
   gradient_accumulation_steps: 8

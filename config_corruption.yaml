@@ -33,18 +33,18 @@ sample_save_dir: 'samples/iter_DPO_corruption'
 output_dir: "checkpoints/iter_DPO_corruption"
 report_to: "wandb"
 eval_strategy: 'steps'
-gradient_accumulation_steps: 3
+gradient_accumulation_steps: 8
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   "use_reentrant": false
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 2
+per_device_eval_batch_size: 1
 num_train_epochs: 2
 learning_rate: 5e-7
 max_grad_norm: 0.5
 beta: 0.1
-max_length: 2048
-max_prompt_length: 1024
+max_length: 1024
+max_prompt_length: 512
 loss_type: "sigmoid"
 save_strategy: "no"
 remove_unused_columns: false

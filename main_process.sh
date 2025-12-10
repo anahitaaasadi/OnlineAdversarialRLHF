@@ -3,12 +3,12 @@
 # Activate the rlhf2 virtual environment
 source rlhf2/bin/activate
 
-for i in $(seq 1 2); do
+for i in $(seq 1); do
     echo "===== Iteration $i: Generating preference samples ====="
-    python data.py config_corruption_mitigation.yaml
+    python data.py config_corruption.yaml
     
     echo "===== Iteration $i: Running DPO training ====="
-    accelerate launch --config_file ds_zero3.yaml DPO.py config_corruption_mitigation.yaml
+    accelerate launch --config_file ds_zero3.yaml DPO.py config_corruption.yaml
     
     # Check if corrupted samples were detected
     FORGET_FILE="data/forget_samples/corrupted_samples_iter_${i}.json"
@@ -19,12 +19,14 @@ for i in $(seq 1 2); do
         python prepare_forget_data.py $i
         
         # Get the latest checkpoint
-        CHECKPOINT_DIR="checkpoints/iter_DPO_mitigation"
+        CHECKPOINT_DIR="checkpoints/iter_DPO_corruption"
         LATEST_CHECKPOINT=$(find "$CHECKPOINT_DIR" -name "final_checkpoint_*" -type d | sort -V | tail -n 1)
         
         if [ -z "$LATEST_CHECKPOINT" ]; then
-            echo "Warning: No checkpoint found, using base model"
-            LATEST_CHECKPOINT=$(grep "ref_model:" config_corruption_mitigation.yaml | cut -d'"' -f2)
+            echo "Error: No checkpoint found in $CHECKPOINT_DIR"
+            echo "DPO training must complete successfully before running IHL forget"
+            echo "Skipping IHL forget for iteration $i"
+            continue
         fi
         
         echo "Using model: $LATEST_CHECKPOINT"

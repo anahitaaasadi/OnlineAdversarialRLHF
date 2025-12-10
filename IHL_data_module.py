@@ -3,6 +3,7 @@ from torch import nn
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 import datasets
+import os
 from IHL_utils import get_model_identifiers_from_yaml, add_dataset_index
 
 def convert_raw_data_to_model_format(tokenizer, max_length, question, answer, model_configs):
@@ -38,9 +39,21 @@ class TextForgetDatasetQA(Dataset):
         super(TextForgetDatasetQA, self).__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.forget_data = datasets.load_dataset(data_path, split)["train"]
-        retain_split = "retain" + str(100 - int(split.replace("forget", ""))).zfill(2)
-        self.retain_data =datasets.load_dataset(data_path, retain_split)["train"]
+        
+        # Check if data_path is a local JSON file
+        if data_path.endswith('.json') and os.path.exists(data_path):
+            import json
+            with open(data_path, 'r') as f:
+                forget_data_list = json.load(f)
+            self.forget_data = datasets.Dataset.from_list(forget_data_list)
+            # For local JSON, use the same data for retain (no separate retain set available)
+            self.retain_data = self.forget_data
+        else:
+            # Use Hugging Face dataset
+            self.forget_data = datasets.load_dataset(data_path, split)["train"]
+            retain_split = "retain" + str(100 - int(split.replace("forget", ""))).zfill(2)
+            self.retain_data = datasets.load_dataset(data_path, retain_split)["train"]
+        
         self.model_configs = get_model_identifiers_from_yaml(model_family)
         self.loss_type = loss_type
 
@@ -84,11 +97,23 @@ class TextForgetDatasetDPOQA(Dataset):
         super(TextForgetDatasetDPOQA, self).__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.forget_data = datasets.load_dataset(data_path, split)["train"]
+        
+        # Check if data_path is a local JSON file
+        if data_path.endswith('.json') and os.path.exists(data_path):
+            import json
+            with open(data_path, 'r') as f:
+                forget_data_list = json.load(f)
+            self.forget_data = datasets.Dataset.from_list(forget_data_list)
+            # For local JSON, use the same data for retain (no separate retain set available)
+            self.retain_data = self.forget_data
+        else:
+            # Use Hugging Face dataset
+            self.forget_data = datasets.load_dataset(data_path, split)["train"]
+            retain_split = "retain" + str(100 - int(split.replace("forget", ""))).zfill(2)
+            self.retain_data = datasets.load_dataset(data_path, retain_split)["train"]
+        
         self.idontknowfile = "data/idontknow.jsonl"
         self.idk = open(self.idontknowfile, "r").readlines()
-        retain_split = "retain" + str(100 - int(split.replace("forget", ""))).zfill(2)
-        self.retain_data = datasets.load_dataset(data_path, retain_split)["train"]
         self.model_configs = get_model_identifiers_from_yaml(model_family)
         
 
@@ -136,9 +161,18 @@ class TextDatasetQA(Dataset):
         super(TextDatasetQA, self).__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        # data_len = len(datasets.load_dataset(data_path, split)["train"])
-        # self.data = datasets.load_dataset(data_path, split)["train"].select(range(min(100, data_len)))
-        self.data = datasets.load_dataset(data_path, split)["train"]
+        
+        # Check if data_path is a local JSON file
+        if data_path.endswith('.json') and os.path.exists(data_path):
+            import json
+            with open(data_path, 'r') as f:
+                data_list = json.load(f)
+            self.data = datasets.Dataset.from_list(data_list)
+        else:
+            # Use Hugging Face dataset
+            # data_len = len(datasets.load_dataset(data_path, split)["train"])
+            # self.data = datasets.load_dataset(data_path, split)["train"].select(range(min(100, data_len)))
+            self.data = datasets.load_dataset(data_path, split)["train"]
 
         self.data = add_dataset_index(self.data)
         self.model_configs = get_model_identifiers_from_yaml(model_family)
