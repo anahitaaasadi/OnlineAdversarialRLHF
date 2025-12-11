@@ -45,7 +45,6 @@ class ScriptArguments:
     ref_gpu_utlization: float = field(default=0.5)
     rm_batch_size: int = field(default=8)
     sample_save_dir: str = field(default='samples')
-    calculate_uncertainty_scores: bool = field(default=False)
 
     # Corruption Params
     corrupt_preferences: bool = field(default=True)
@@ -90,25 +89,316 @@ def corrupt_scores(scores: np.ndarray, args: ScriptArguments) -> np.ndarray:
     return corrupted_scores
 
 
-def attack_mitigation(pos: list, neg: list, prompts: list, margin: list, corrupted_scores: list) -> tuple[list, list, list, list, list]:
-    """Identify corrupted samples using uncertainty scores.
-    Returns indices of samples to forget instead of flipping labels.
+def attack_mitigation(
+    pos: list, 
+    neg: list, 
+    prompts: list, 
+    margin: list, 
+    corrupted_scores: np.ndarray,
+    model,
+    tokenizer,
+    model_config,
+    device: str = "cuda:0"
+) -> tuple[list, list, list, list]:
     """
+    Identify corrupted samples and unlearn them using IHL framework.
+    Returns the original data unchanged (unlearning modifies the model in-place).
+    """
+    import json
+    import tempfile
+    from functools import reduce
+    from pathlib import Path
+    from peft import LoraConfig, get_peft_model
+    import transformers
+    import deepspeed
+    import copy
+    from tqdm import tqdm
+    
+    # Identify corrupted samples
     threshold = 1.01
     corrupted_indices = []
     
     for idx in range(len(prompts)):
         score = corrupted_scores[idx]
-
         threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) <= threshold
         inv_threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) >= 1/threshold
-
-        should_forget = threshold_bool and not inv_threshold_bool
-
-        if should_forget:
+        should_unlearn = threshold_bool and not inv_threshold_bool
+        
+        if should_unlearn:
             corrupted_indices.append(idx)
+    
+    if len(corrupted_indices) == 0:
+        print("No corrupted samples detected for unlearning.")
+        return pos, neg, prompts, margin
+    
+    print(f"Identified {len(corrupted_indices)} corrupted samples for unlearning.")
+    
+    # Create forget dataset with corrupted samples
+    forget_data = []
+    for idx in corrupted_indices:
+        forget_data.append({
+            "question": prompts[idx],
+            "answer": neg[idx]  # The incorrectly preferred response (currently labeled as positive)
+        })
+    
+    # Create retain dataset with clean samples
+    retain_data = []
+    for idx in range(len(prompts)):
+        if idx not in corrupted_indices:
+            retain_data.append({
+                "question": prompts[idx],
+                "answer": pos[idx]
+            })
+    
+    # Save datasets to temporary files
+    with tempfile.NamedTemporaryFile(mode='w', suffix='_forget.json', delete=False) as f:
+        json.dump(forget_data, f)
+        forget_file = f.name
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='_retain.json', delete=False) as f:
+        json.dump(retain_data, f)
+        retain_file = f.name
+    
+    try:
+        # ========== STEP 1: Measure Importance ==========
+        print("Step 1: Measuring importance scores...")
+        
+        from IHL_data_module import TextForgetDatasetQA
+        from IHL_dataloader import custom_data_collator_forget
+        
+        # Create combined dataset for importance measurement
+        combined_data = forget_data + retain_data[:len(forget_data)]  # Balance the dataset
+        with tempfile.NamedTemporaryFile(mode='w', suffix='_combined.json', delete=False) as f:
+            json.dump(combined_data, f)
+            combined_file = f.name
+        
+        importance_dataset = TextForgetDatasetQA(
+            combined_file,
+            tokenizer=tokenizer,
+            model_family=model_config.get('model_family', 'phi'),
+            max_length=500,
+            split='forget01',
+            loss_type='grad_diff'
+        )
+        
+        # Setup for importance measurement
+        batch_size = 8
+        gradient_accumulation_steps = 1
+        
+        importance_args = transformers.TrainingArguments(
+            output_dir=tempfile.mkdtemp(),
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            max_steps=1,  # Just one pass for importance
+            bf16=True,
+            logging_steps=1,
+            save_strategy="no",
+            ddp_find_unused_parameters=False,
+        )
+        
+        # Create a minimal trainer just to get dataloader
+        from IHL_dataloader import CustomTrainerForgetting
+        
+        temp_trainer = CustomTrainerForgetting(
+            model=model,
+            train_dataset=importance_dataset,
+            eval_dataset=importance_dataset,
+            args=importance_args,
+            data_collator=custom_data_collator_forget,
+            forget_loss='grad_diff',
+        )
+        
+        # Find linear layer names for importance tracking
+        def find_all_linear_names(model):
+            cls = torch.nn.Linear
+            lora_module_names = set()
+            for name, module in model.named_modules():
+                if isinstance(module, cls):
+                    names = name.split('.')
+                    lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+            if 'lm_head' in lora_module_names:
+                lora_module_names.remove('lm_head')
+            return list(lora_module_names)
+        
+        target_modules = find_all_linear_names(model)
+        
+        # Initialize importance dictionaries
+        importance_f = {}
+        importance_r = {}
+        for name, param in model.named_parameters():
+            for t in target_modules:
+                if t in name and 'weight' in name:
+                    importance_f[name] = torch.zeros_like(param.data, device='cpu')
+                    importance_r[name] = torch.zeros_like(param.data, device='cpu')
+        
+        model.train()
+        for param in model.parameters():
+            param.requires_grad = True
+        
+        f_cnt = 0
+        r_cnt = 0
+        
+        # Measure importance
+        dataloader = temp_trainer.get_train_dataloader()
+        for step, inputs in enumerate(tqdm(dataloader, desc="Measuring importance")):
+            if step >= len(forget_data) // batch_size + 1:  # Limit iterations
+                break
+                
+            forget_input, retain_input = inputs
+            
+            # Forget samples
+            input_ids, labels, attention_mask = forget_input
+            output = model(
+                input_ids=input_ids.to(device),
+                labels=labels.to(device),
+                attention_mask=attention_mask.to(device)
+            )
+            if output.loss is not None:
+                output.loss.backward()
+                cnt = torch.sum(labels != -100)
+                for n, param in model.named_parameters():
+                    if n in importance_f and param.grad is not None:
+                        importance_f[n] += (param.grad.pow(2) * cnt.item()).detach().cpu()
+                    if param.grad is not None:
+                        param.grad = None
+                f_cnt += cnt.item()
+            
+            # Retain samples
+            input_ids, labels, attention_mask = retain_input
+            output = model(
+                input_ids=input_ids.to(device),
+                labels=labels.to(device),
+                attention_mask=attention_mask.to(device)
+            )
+            if output.loss is not None:
+                output.loss.backward()
+                cnt = torch.sum(labels != -100)
+                for n, param in model.named_parameters():
+                    if n in importance_r and param.grad is not None:
+                        importance_r[n] += (param.grad.pow(2) * cnt.item()).detach().cpu()
+                    if param.grad is not None:
+                        param.grad = None
+                r_cnt += cnt.item()
+        
+        print(f"Importance measurement complete: f_cnt={f_cnt}, r_cnt={r_cnt}")
+        
+        # ========== STEP 2: Apply FILA (Importance-Weighted LoRA Initialization) ==========
+        print("Step 2: Applying FILA with importance-weighted LoRA...")
+        
+        # Configure LoRA
+        lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+        lora_r = 8
+        lora_alpha = 32
+        
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_targets,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        
+        model = get_peft_model(model, lora_config)
+        
+        # Initialize LoRA weights with importance
+        def get_module_by_name(module, access_string):
+            names = access_string.split(sep='.')
+            return reduce(getattr, names, module)
+        
+        importances = {
+            n: torch.div(importance_f[n] / (f_cnt + 1e-10), 1e-5 + (importance_r[n] / (r_cnt + 1e-10)))
+            for n in importance_f.keys()
+        }
+        
+        initialized_layers = 0
+        for old_name, importance in importances.items():
+            if not any([target_name in old_name for target_name in lora_targets]):
+                continue
+            
+            name = old_name.replace("module.", '')
+            lora_A_path = 'base_model.model.' + name.replace(".weight", '') + '.lora_A.default'
+            lora_B_path = 'base_model.model.' + name.replace(".weight", '') + '.lora_B.default'
+            base_layer_path = 'base_model.model.' + name.replace(".weight", '') + '.base_layer'
+            scaling_path = 'base_model.model.' + name.replace(".weight", '') + '.scaling'
+            
+            try:
+                lora_A = get_module_by_name(model, lora_A_path)
+                lora_B = get_module_by_name(model, lora_B_path)
+                base_layer = get_module_by_name(model, base_layer_path)
+                scaling = get_module_by_name(model, scaling_path)
+                
+                orig_shape = base_layer.weight.shape
+                W = base_layer.weight.data.reshape(orig_shape)
+                dtype = W.dtype
+                W = W.to(torch.float32)
+                
+                # Importance-weighted low-rank approximation
+                row_importance = importance.sum(dim=1).sqrt().to(W.device)
+                U, S, V = torch.svd_lowrank(row_importance[:, None] * W, q=lora_r)
+                S = S / scaling['default']
+                
+                new_lora_A = (V * torch.sqrt(S)).t()
+                new_lora_B = (1 / (row_importance + 1e-5))[:, None] * (U * torch.sqrt(S))
+                new_residual = base_layer.weight.data.reshape(orig_shape) - scaling['default'] * new_lora_B @ new_lora_A
+                
+                lora_A.weight.data = new_lora_A.contiguous().to(dtype)
+                lora_B.weight.data = new_lora_B.contiguous().to(dtype)
+                base_layer.weight.data = new_residual.contiguous().to(dtype)
+                
+                initialized_layers += 1
+            except (AttributeError, KeyError) as e:
+                continue
+        
+        print(f"FILA: Initialized {initialized_layers} LoRA layers")
+        
+        # ========== STEP 3: Unlearning via Gradient Ascent ==========
+        print("Step 3: Performing unlearning via gradient ascent...")
+        
+        forget_dataset = TextForgetDatasetQA(
+            forget_file,
+            tokenizer=tokenizer,
+            model_family=model_config.get('model_family', 'phi'),
+            max_length=500,
+            split='forget01',
+            loss_type='grad_ascent'
+        )
+        
+        unlearn_args = transformers.TrainingArguments(
+            output_dir=tempfile.mkdtemp(),
+            per_device_train_batch_size=8,
+            gradient_accumulation_steps=1,
+            max_steps=min(20, len(corrupted_indices) // 4 + 1),
+            learning_rate=1e-5,
+            bf16=True,
+            logging_steps=5,
+            save_strategy="no",
+            ddp_find_unused_parameters=False,
+            weight_decay=0.01,
+        )
+        
+        unlearn_trainer = CustomTrainerForgetting(
+            model=model,
+            train_dataset=forget_dataset,
+            eval_dataset=forget_dataset,
+            args=unlearn_args,
+            data_collator=custom_data_collator_forget,
+            forget_loss='grad_ascent',
+            grad_diff_coeff=1.0,
+        )
+        
+        unlearn_trainer.train()
+        print("Unlearning complete.")
+        
+    finally:
+        # Cleanup temporary files
+        import os
+        for f in [forget_file, retain_file, combined_file]:
+            if os.path.exists(f):
+                os.unlink(f)
+    
+    return pos, neg, prompts, margin
 
-    return pos, neg, prompts, margin, corrupted_indices
 
 
 def prepare_data(
@@ -119,7 +409,10 @@ def prepare_data(
     eot_token="",
     is_train=True,
     uncertainty_scores: np.ndarray | None = None,
-    iteration: int = 0
+    model=None,
+    tokenizer=None,
+    model_config: dict | None = None,
+    device: str = "cuda:0"
 ) -> Dataset:
 
     pos = []
@@ -142,25 +435,10 @@ def prepare_data(
 
         if args.mitigate_corruption and uncertainty_scores is not None:
             corrupted_scores = corrupt_scores(uncertainty_scores, args)
-            pos, neg, prompts, margin, corrupted_indices = attack_mitigation(pos, neg, prompts, margin, corrupted_scores)
-            
-            # Save corrupted samples for IHL forget
-            if len(corrupted_indices) > 0:
-                corrupted_data = {
-                    "prompts": [prompts[i] for i in corrupted_indices],
-                    "chosen": [pos[i] for i in corrupted_indices],
-                    "rejected": [neg[i] for i in corrupted_indices],
-                    "indices": corrupted_indices
-                }
-                
-                forget_dir = "data/forget_samples"
-                os.makedirs(forget_dir, exist_ok=True)
-                forget_file = os.path.join(forget_dir, f"corrupted_samples_iter_{iteration}.json")
-                
-                with open(forget_file, 'w') as f:
-                    json.dump(corrupted_data, f, indent=4)
-                
-                print(f"Saved {len(corrupted_indices)} corrupted samples to {forget_file}")
+            pos, neg, prompts, margin = attack_mitigation(
+                pos, neg, prompts, margin, corrupted_scores,
+                model, tokenizer, model_config, device
+            )
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
@@ -173,7 +451,7 @@ def prepare_data(
 def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     train_samples = {}
     eval_samples = {}
-    for sample_fp in sorted([os.path.join(args.sample_save_dir, file) for file in os.listdir(args.sample_save_dir) if file.endswith('.json')], key=os.path.getctime):
+    for sample_fp in sorted([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.json')], key=os.path.getctime):
         with open(sample_fp) as fp:
             pref_pairs = list(json.load(fp).items())
             train_pref_pairs = {k: v for (k, v) in pref_pairs[:args.train_samples_drawn_size]}
@@ -185,12 +463,8 @@ def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     return train_samples, eval_samples
 
 
-def load_uncertainty_scores(sample_save_dir: str) -> np.ndarray:
-    npz_files = [os.path.join(sample_save_dir, file) for file in os.listdir(sample_save_dir) if file.endswith('.npz')]
-    if not npz_files:
-        print(f"Warning: No uncertainty score files found in {sample_save_dir} directory. Returning None.")
-        return None
-    fp = max(npz_files, key=os.path.getctime)
+def load_uncertainty_scores() -> np.ndarray:
+    fp = max([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.npz')], key=os.path.getctime)
     return np.load(fp)['arr_0']
 
 
@@ -216,10 +490,7 @@ if __name__ == "__main__":
     print(f'Mitigating attacks : {script_args.mitigate_corruption}')
 
     train_pref_pairs, eval_pref_pairs = load_data(script_args)
-    scores = load_uncertainty_scores(script_args.sample_save_dir) if script_args.mitigate_corruption else None
-    
-    # Determine current iteration
-    iteration = n + 1
+    scores = load_uncertainty_scores()
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
@@ -245,7 +516,7 @@ if __name__ == "__main__":
 
     model_ref.gradient_checkpointing_enable()
     
-    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     if script_args.eos_padding:
         tokenizer.pad_token = tokenizer.eos_token
     else:
@@ -265,7 +536,10 @@ if __name__ == "__main__":
         eot_token=script_args.eot_token,
         is_train=True,
         uncertainty_scores=scores,
-        iteration=iteration
+        model=model,
+        tokenizer=tokenizer,
+        model_config={'model_family': 'phi'},
+        device=script_args.device
     )
     
     eval_dataset = prepare_data(
