@@ -10,14 +10,10 @@ This repository implements an online RLHF (Reinforcement Learning from Human Fee
 
 ## Directory Structure
 
-- **`main.py`** — Entry point for running the full online RLHF workflow.
 - **`data.py`** — Defines `PreferenceSampler` for generating prompt–response pairs and sampling preferences.
-- **`filter.py`** — Implements adversarial corruption simulation and filtering utilities.
 - **`requirements.txt`** — Python package dependencies.
-- **`BestMods/`** — Stores model checkpoints for each RLHF iteration.
 - **`DPO/`** — Contains Direct Preference Optimization (DPO) utilities and trainer extensions.
 - **`IHL/`** — Contains Inverse Hinge Loss (IHL) and machine unlearning components.
-- **`rlhf/`** — Python virtual environment directory (optional).
 - **Other files** — `README`, caches, and supporting code.
 
 ---
