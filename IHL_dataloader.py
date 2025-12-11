@@ -15,7 +15,7 @@ from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_c
 
 from IHL_data_module import get_batch_loss 
 from IHL_utils import merge_dicts, interleave_eval_result_dict, get_forget_quality, get_model_utility
-from IHL_evaluate import get_dataloader, get_all_evals
+# from IHL_evaluate import get_dataloader, get_all_evals
 
 def printll(name, inp):
     #print list with 4 decimal for each item
@@ -404,17 +404,17 @@ class CustomTrainerForgetting(Trainer):
                     print(f"Skipping {eval_task} because {save_filename} already exists")
                     continue
 
-                eval_dataloader, base_eval_dataloader, perturb_dataloader = get_dataloader(
-                    eval_cfg, 
-                    eval_task, 
-                    self.tokenizer, 
-                    folder, 
-                    split, 
-                    question_key, 
-                    answer_key, 
-                    base_answer_key, 
-                    perturbed_answer_key
-                )
+                # eval_dataloader, base_eval_dataloader, perturb_dataloader = get_dataloader(
+                #     eval_cfg, 
+                #     eval_task, 
+                #     self.tokenizer, 
+                #     folder, 
+                #     split, 
+                #     question_key, 
+                #     answer_key, 
+                #     base_answer_key, 
+                #     perturbed_answer_key
+                # )
                 eval_dataloader = self.accelerator.prepare(eval_dataloader)
                 # print('dataset condition: ', len(eval_dataloader.dataset), self.accelerator.local_process_index)
                 base_eval_dataloader = self.accelerator.prepare(base_eval_dataloader)
@@ -423,16 +423,16 @@ class CustomTrainerForgetting(Trainer):
                 # if 'eval_log' not in eval_task:
                 #     normalize_gt = True
 
-                eval_logs = get_all_evals(
-                    eval_cfg, 
-                    model, 
-                    self.tokenizer, 
-                    eval_task, 
-                    eval_dataloader, 
-                    base_eval_dataloader, 
-                    perturb_dataloader, 
-                    normalize_gt=normalize_gt
-                )
+                # eval_logs = get_all_evals(
+                #     eval_cfg, 
+                #     model, 
+                #     self.tokenizer, 
+                #     eval_task, 
+                #     eval_dataloader, 
+                #     base_eval_dataloader, 
+                #     perturb_dataloader, 
+                #     normalize_gt=normalize_gt
+                # )
 
                 with open(save_filename, "w") as f:
                     # pretty write json to f

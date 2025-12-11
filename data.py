@@ -6,12 +6,6 @@ import json
 
 import torch
 import numpy as np
-
-# Monkey patch for vLLM tokenizer compatibility with phi-2
-from transformers import CodeGenTokenizer
-if not hasattr(CodeGenTokenizer, 'all_special_tokens_extended'):
-    CodeGenTokenizer.all_special_tokens_extended = property(lambda self: self.all_special_tokens)
-
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 from transformers import AutoTokenizer, pipeline, HfArgumentParser
@@ -30,10 +24,10 @@ class PreferenceSamplerConfig:
     num_return_sequences: int = field(default=4, metadata={'help': 'How many samples are generated per policy before rejection sampling'})
     generation_seed: int | None = field(default=42, metadata={'help': 'Sample generation seed'})
     dataset_dir: str = field(default='ultrafeedback_iter1', metadata={'help': 'Dataset from which the prompts are sampled.'})
-    ref_model: str = field(default='microsoft/phi-2', metadata={'help': 'Policy being trained.'})
+    ref_model: str = field(default='LLaMA3-SFT', metadata={'help': 'Policy being trained.'})
     ref_device: int = field(default=0, metadata={'help': 'GPU index where the policy model is loaded into.'})
     ref_gpu_utlization: float = field(default=0.75, metadata={'help': 'How much GPU should vLLM occupy between 0.0 and 1.0. Higher is better for faster inference at scale.'})
-    reward_model: str = field(default='OpenAssistant/reward-model-deberta-v3-large-v2', metadata={'help': 'Reward model which simulates human feedback.'})
+    reward_model: str = field(default='FsfairX-LLaMA3-RM-v0.1', metadata={'help': 'Reward model which simulates human feedback.'})
     # rm_gpu_utlization: float = field(default=0.75, metadata={'help': 'How much GPU should vLLM occupy between 0.0 and 1.0. Higher is better for faster inference at scale.'})
     rm_batch_size: int = field(default=2 * 4, metadata={'help': 'To speedup the reward calculating for all the samples created.'})
     rm_device: int = field(default=0, metadata={'help': 'GPU index where the reward model is loaded into.'})
@@ -59,53 +53,22 @@ class PreferenceSampler:
         self.rm_path = config.reward_model
 
     def generate_responses(self) -> tuple[list[RequestOutput], list[RequestOutput]]:
-        ref_tokenizer = AutoTokenizer.from_pretrained(self.ref_model_path, trust_remote_code=True)
+        ref_tokenizer = AutoTokenizer.from_pretrained(self.ref_model_path)
 
-        # Format prompts - use chat template if available, otherwise format manually
-        def format_prompt(x):
-            if hasattr(ref_tokenizer, 'chat_template') and ref_tokenizer.chat_template is not None:
-                return {'prompt': ref_tokenizer.apply_chat_template(x['context_messages'], tokenize=False, add_generation_prompt=True)}
-            else:
-                # Fallback for models without chat template (like phi-2)
-                messages = x['context_messages']
-                prompt = ""
-                for msg in messages:
-                    role = msg.get('role', 'user')
-                    content = msg.get('content', '')
-                    if role == 'system':
-                        prompt += f"System: {content}\n\n"
-                    elif role == 'user':
-                        prompt += f"Human: {content}\n\n"
-                    elif role == 'assistant':
-                        prompt += f"Assistant: {content}\n\n"
-                # Add final prompt for generation
-                prompt += "Assistant:"
-                return {'prompt': prompt}
-        
-        dataset = self.dataset.map(format_prompt)
-        
-        # Filter out prompts that are too long (need room for 1024 token generation)
-        def filter_long_prompts(example):
-            tokenized = ref_tokenizer(example['prompt'], return_tensors='pt')
-            return len(tokenized['input_ids'][0]) <= 1024  # Leave room for 1024 token generation
-        
-        dataset = dataset.filter(filter_long_prompts)
-        print(f"Filtered dataset size: {len(dataset)} samples (max prompt length: 1024 tokens)")
+        dataset = self.dataset.map(lambda x: {'prompt': ref_tokenizer.apply_chat_template(x['context_messages'], tokenize=False, add_generation_prompt=True)})
 
         os.environ['CUDA_VISIBLE_DEVICES'] = f'{self.config.ref_device}'
 
         ref_model = LLM(model=self.ref_model_path, enforce_eager=True, 
-                        gpu_memory_utilization=self.config.ref_gpu_utlization,
-                        trust_remote_code=True,
-                        max_model_len=2048)  # Phi-2 maximum sequence length
+                        gpu_memory_utilization=self.config.ref_gpu_utlization)
 
         policy_1_param = SamplingParams(n=self.config.num_return_sequences, 
-                            max_tokens=1024, temperature=1.0,
+                            max_tokens=2048, temperature=1.0,
                             seed=self.config.generation_seed,
                             stop_token_ids=[ref_tokenizer.eos_token_id])
 
         policy_2_param = SamplingParams(n=self.config.num_return_sequences, 
-                            max_tokens=1024, temperature=0.7,
+                            max_tokens=2048, temperature=0.7,
                             seed=self.config.generation_seed,
                             stop_token_ids=[ref_tokenizer.eos_token_id])
 
@@ -121,7 +84,7 @@ class PreferenceSampler:
 
 
     def rejection_sampling(self, outputs_policy_1: list[RequestOutput], outputs_policy_2: list[RequestOutput]) -> dict:
-        rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path, trust_remote_code=True)
+        rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path)
         eot_id = '<|eot_id|>'
 
         rm_pipe = pipeline(
@@ -187,7 +150,7 @@ class PreferenceSampler:
         """
         NOTE: Still in progress. Still figuring out why batch scaling affects the scores. 
         """
-        rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path, trust_remote_code=True)
+        rm_tokenizer = AutoTokenizer.from_pretrained(self.rm_path)
         eot_id = '<|eot_id|>'
 
         # FIX: Set padding side to right for classification/reward modeling
@@ -267,9 +230,10 @@ class PreferenceSampler:
 
 
 if __name__ == '__main__':
-    ds_id = "RLHFlow/ultrafeedback_iter1"
-    ref_model_path = "microsoft/phi-2"
-    reward_model_path = "OpenAssistant/reward-model-deberta-v3-large-v2"
+    MODEL_DIR = os.path.join('/home/vbharg4@AD', 'models')
+    ds_id = os.path.join(os.getcwd(), "ultrafeedback_iter1")
+    ref_model_path = os.path.join(MODEL_DIR, 'LLaMA3-SFT')
+    reward_model_path = os.path.join(MODEL_DIR, 'FsfairX-LLaMA3-RM-v0.1')
 
     parser = HfArgumentParser((DPOConfig, PreferenceSamplerConfig))
     parser.add_argument('config_file', help='DPO.py config file', default=None)
@@ -293,12 +257,12 @@ if __name__ == '__main__':
     print(f'Calculate uncertainty : {config.calculate_uncertainty_scores}')
 
     outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
-    samples_preference_pair = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
+    samples_preference_pair = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_1)
 
     file_name_prefix = f'{n + 1}'
-    os.makedirs(config.sample_save_dir, exist_ok=True)
+    os.makedirs('samples', exist_ok=True)
 
-    with open(os.path.join(config.sample_save_dir, f'{file_name_prefix}.json'), mode='w') as f:
+    with open(os.path.join('samples', f'{file_name_prefix}.json'), mode='w') as f:
         json.dump(samples_preference_pair, fp=f, indent=4)
 
     if config.calculate_uncertainty_scores:
@@ -306,4 +270,4 @@ if __name__ == '__main__':
         all_train_samples_preference_pair = pref_sampler.combine_with_prior_train_samples(train_samples_preference_pair)
 
         scores = get_uncertainity_scores(all_train_samples_preference_pair, config=UncertaintyConfig(ref_model_path))
-        np.savez_compressed(os.path.join(config.sample_save_dir, f'{file_name_prefix}.npz'), scores)
+        np.savez_compressed(os.path.join('samples', f'{file_name_prefix}.npz'), scores)

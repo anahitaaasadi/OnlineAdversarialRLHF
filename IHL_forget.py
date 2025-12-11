@@ -340,7 +340,7 @@ def main(cfg):
 
     if cfg.save_model and (not cfg.eval_only):
         if cfg.importance_file:
-            model = model.unload()
+            model = model.merge_and_unload()
         model.save_pretrained(cfg.save_dir)
         tokenizer.save_pretrained(cfg.save_dir)
 
