@@ -21,24 +21,25 @@ This repository implements an online RLHF (Reinforcement Learning from Human Fee
 
 ## Installation
 
-0. **Download the dataset**
+**Download the dataset**
 Install git-xet (https://hf.co/docs/hub/git-xet)
+```bash
 brew install git-xet
 git xet install
+```
 
+```bash
 git clone git@hf.co:datasets/RLHFflow/ultrafeedback_iter1
+```
 
-### If you want to clone without large files - just their pointers
-GIT_LFS_SKIP_SMUDGE=1 git clone git@hf.co:datasets/RLHFflow/ultrafeedback_iter1
-
-### Make sure the hf CLI is installed
-curl -LsSf https://hf.co/cli/install.sh | bash
-
-### Download the dataset
-hf download RLHFflow/ultrafeedback_iter1 --repo-type=dataset
-
-**Download the model**
-https://huggingface.co/sfairXC/FsfairX-LLaMA3-RM-v0.1
+**Download the reward model**
+```bash
+git clone git@hf.co:sfairXC/FsfairX-LLaMA3-RM-v0.1
+```
+**Download the reward model**
+```bash
+git clone git@hf.co:RLHFlow/LLaMA3-SFT
+```
 
 1. **Update the paths in the yaml files.**
 
