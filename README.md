@@ -36,7 +36,7 @@ git clone git@hf.co:datasets/RLHFflow/ultrafeedback_iter1
 ```bash
 git clone git@hf.co:sfairXC/FsfairX-LLaMA3-RM-v0.1
 ```
-**Download the reward model**
+**Download the policy model**
 ```bash
 git clone git@hf.co:RLHFlow/LLaMA3-SFT
 ```
