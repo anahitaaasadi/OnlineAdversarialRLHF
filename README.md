@@ -28,18 +28,19 @@ git xet install
 
 git clone git@hf.co:datasets/RLHFflow/ultrafeedback_iter1
 
-# If you want to clone without large files - just their pointers
+### If you want to clone without large files - just their pointers
 GIT_LFS_SKIP_SMUDGE=1 git clone git@hf.co:datasets/RLHFflow/ultrafeedback_iter1
 
-# Make sure the hf CLI is installed
+### Make sure the hf CLI is installed
 curl -LsSf https://hf.co/cli/install.sh | bash
 
-# Download the dataset
+### Download the dataset
 hf download RLHFflow/ultrafeedback_iter1 --repo-type=dataset
 
-**Download the model https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct**
+**Download the model**
+https://huggingface.co/sfairXC/FsfairX-LLaMA3-RM-v0.1
 
-**Update the paths in the yaml files.**
+1. **Update the paths in the yaml files.**
 
 2. **Create a Conda environment** (recommended):
     ```bash
