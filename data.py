@@ -219,8 +219,9 @@ class PreferenceSampler:
 
     def combine_with_prior_train_samples(self, current_train_samples: dict) -> dict:
         train_samples = {}
+        root_dir = self.config.sample_save_dir
 
-        for sample_fp in sorted([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.json')], key=os.path.getctime):
+        for sample_fp in sorted([os.path.join(root_dir, file) for file in os.listdir(root_dir) if file.endswith('.json')], key=os.path.getctime):
             with open(sample_fp) as fp:
                 pref_pairs = list(json.load(fp).items())
                 train_pref_pairs = {k: v for (k, v) in pref_pairs[:self.config.train_samples_drawn_size]}
@@ -249,6 +250,7 @@ if __name__ == '__main__':
 
         if n > 0:
             ref_model_path = max(final_checkpoints_path, key=os.path.getctime)
+            config.ref_model = ref_model_path
     else:
         n = 0
         config = PreferenceSamplerConfig(dataset_dir=ds_id, ref_model=ref_model_path, reward_model=reward_model_path)
@@ -257,12 +259,12 @@ if __name__ == '__main__':
     print(f'Calculate uncertainty : {config.calculate_uncertainty_scores}')
 
     outputs_policy_1, outputs_policy_2 = pref_sampler.generate_responses()
-    samples_preference_pair = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_1)
+    samples_preference_pair = pref_sampler.rejection_sampling(outputs_policy_1, outputs_policy_2)
 
     file_name_prefix = f'{n + 1}'
-    os.makedirs('samples', exist_ok=True)
+    os.makedirs(config.sample_save_dir, exist_ok=True)
 
-    with open(os.path.join('samples', f'{file_name_prefix}.json'), mode='w') as f:
+    with open(os.path.join(config.sample_save_dir, f'{file_name_prefix}.json'), mode='w') as f:
         json.dump(samples_preference_pair, fp=f, indent=4)
 
     if config.calculate_uncertainty_scores:
@@ -270,4 +272,4 @@ if __name__ == '__main__':
         all_train_samples_preference_pair = pref_sampler.combine_with_prior_train_samples(train_samples_preference_pair)
 
         scores = get_uncertainity_scores(all_train_samples_preference_pair, config=UncertaintyConfig(ref_model_path))
-        np.savez_compressed(os.path.join('samples', f'{file_name_prefix}.npz'), scores)
+        np.savez_compressed(os.path.join(config.sample_save_dir, f'{file_name_prefix}.npz'), scores)

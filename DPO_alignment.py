@@ -91,10 +91,10 @@ class H4ArgumentParser(HfArgumentParser):
         if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
             # If we pass only one argument to the script and it's the path to a YAML file,
             # let's parse it to get our arguments.
-            output = self.parse_yaml_file(os.path.abspath(sys.argv[1]))
+            output = self.parse_yaml_file(os.path.abspath(sys.argv[1]), allow_extra_keys=True)
         # parse command line args and yaml file
         elif len(sys.argv) > 2 and sys.argv[1].endswith(".yaml"):
-            output = self.parse_yaml_and_args(os.path.abspath(sys.argv[1]), sys.argv[2:])
+            output = self.parse_yaml_and_args(os.path.abspath(sys.argv[1]), sys.argv[2:], allow_extra_keys=True)
         # parse command line args only
         else:
             output = self.parse_args_into_dataclasses()

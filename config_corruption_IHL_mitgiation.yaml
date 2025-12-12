@@ -14,8 +14,11 @@ choose_type: "max_random"
 ignore_bias_buffers: false
 eot_token: "<|eot_id|>"
 len_penalty: 0.0
-corrupt_preferences: false
+corrupt_preferences: true
+corruption_percentage: 0.2
+corruption_seed: 42
 mitigate_corruption: false
+mitigate_corruption_IHL: true
 
 # ===== PreferenceSamplerConfig-related fields =====
 samples_drawn_size: 2100
@@ -25,19 +28,18 @@ generation_seed: 42
 dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 ref_gpu_utlization: 0.75
 rm_batch_size: 8
-sample_save_dir: 'samples/iter_DPO'
-calculate_uncertainty_scores: false
+sample_save_dir: 'samples/iter_DPO_IHL_mitigation'
+calculate_uncertainty_scores: true
 
 # ===== DPOConfig fields (from trl) =====
-output_dir: "checkpoints/iter_DPO"
-# report_to: "wandb"
+output_dir: "checkpoints/iter_DPO_IHL_mitigation"
 eval_strategy: 'steps'
 gradient_accumulation_steps: 3
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   "use_reentrant": false
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 2
 num_train_epochs: 2
 learning_rate: 5e-7
 max_grad_norm: 0.5
@@ -55,3 +57,29 @@ model_name_or_path: null
 dtype: "bfloat16"
 trust_remote_code: false
 use_peft: false
+
+# ===== IHLArgs ===== #
+IHL_args:
+  forget_loss: 'IHL'
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  lr: 5e-7
+  max_grad_norm: 0.5
+  num_epochs: 3  # Fewer epochs for forgetting corrupted samples
+  weight_decay: 0.01
+  seed: 42
+
+  LORA:
+    r: 8
+    alpha: 16
+    dropout: 0.1
+    targets: 'all'
+  
+  npo_coeff: 0.0
+  grad_diff_coeff: 0.0
+  KL_coeff: 0.0
+  ref_policy: "original"
+  beta: 0.1
+
+  eval:
+    enabled: false

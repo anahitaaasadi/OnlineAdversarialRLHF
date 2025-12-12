@@ -3,6 +3,15 @@ import copy
 import numpy as np
 from scipy.stats import sem, hmean, ks_2samp
 from natsort import natsorted
+
+
+def get_model_identifiers_from_DPO_yaml(yaml_path) -> dict:
+    with open(yaml_path) as f:
+        model_configs = yaml.load(f, Loader=yaml.FullLoader)
+
+    return model_configs
+
+
 def get_model_identifiers_from_yaml(model_family):
     #path is model_configs.yaml
     '''
@@ -15,7 +24,7 @@ def get_model_identifiers_from_yaml(model_family):
             start_of_sequence_token: "<s>"
     '''
     model_configs  = {}
-    with open("config/model_config.yaml", "r") as f:
+    with open("IHL_config/model_config.yaml", "r") as f:
         model_configs = yaml.load(f, Loader=yaml.FullLoader)
     return model_configs[model_family]
 

@@ -1,10 +1,10 @@
 # ===== ScriptArguments fields =====
-ref_model: "microsoft/phi-2"
-reward_model: "OpenAssistant/reward-model-deberta-v3-large-v2"
-train_dir: "/home/aasadi5/Codes/OnlineAdversarialRLHF/ultrafeedback_iter1"
+ref_model: "/home/vbharg4@AD/models/LLaMA3-SFT"
+reward_model: "/home/vbharg4@AD/models/FsfairX-LLaMA3-RM-v0.1"
+train_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 
 ref_device: 0
-rm_device: 1
+rm_device: 0
 
 eos_padding: true
 margin_scale: 1.0
@@ -18,37 +18,40 @@ corrupt_preferences: true
 corruption_percentage: 0.2
 corruption_seed: 42
 mitigate_corruption: false
+mitigate_corruption_IHL: false
 
 # ===== PreferenceSamplerConfig-related fields =====
 samples_drawn_size: 2100
 train_samples_drawn_size: 2000
 num_return_sequences: 4
 generation_seed: 42
-dataset_dir: "RLHFlow/ultrafeedback_iter1"
+dataset_dir: "/home/vbharg4@AD/RLHF_proj/ultrafeedback_iter1"
 ref_gpu_utlization: 0.75
 rm_batch_size: 8
 sample_save_dir: 'samples/iter_DPO_corruption'
+calculate_uncertainty_scores: false
 
 # ===== DPOConfig fields (from trl) =====
 output_dir: "checkpoints/iter_DPO_corruption"
-report_to: "wandb"
+# report_to: "wandb"
 eval_strategy: 'steps'
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 3
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   "use_reentrant": false
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 2
 num_train_epochs: 2
 learning_rate: 5e-7
 max_grad_norm: 0.5
 beta: 0.1
-max_length: 1024
-max_prompt_length: 512
+max_length: 2048
+max_prompt_length: 1024
 loss_type: "sigmoid"
 save_strategy: "no"
 remove_unused_columns: false
 logging_steps: 10
+data_seed: 42
 
 # ===== ModelConfig fields (from trl) =====
 model_name_or_path: null

@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, set_seed
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, set_seed, HfArgumentParser
 import deepspeed
 import json
 import hydra 
@@ -14,7 +14,7 @@ import numpy as np
 
 from IHL_data_module import TextForgetDatasetQA, TextForgetDatasetDPOQA
 from IHL_dataloader import CustomTrainerForgetting, custom_data_collator_forget
-from IHL_utils import get_model_identifiers_from_yaml
+from IHL_utils import get_model_identifiers_from_DPO_yaml
 
 def find_all_linear_names(model):
     cls = torch.nn.Linear
@@ -43,14 +43,33 @@ def print_trainable_parameters(model):
         f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
     )
 
-@hydra.main(version_base=None, config_path="config", config_name="forget")
-def main(cfg):
 
-    if cfg.importance_file: # if using FILA
-        print("Using FILA...")
-        cfg.save_dir = cfg.save_dir.replace(cfg.forget_loss, cfg.forget_loss+"_FILA")
+def main():
+    parser = HfArgumentParser()
+    parser.add_argument('config_file', help='DPO.py config file', default=None)
+    args = parser.parse_args()
+
+    if args.config_file is not None:
+        config = get_model_identifiers_from_DPO_yaml(args.config_file)
+        iter_dpo_checkpoint_path = config['output_dir']
+        final_checkpoints_path = [os.path.join(iter_dpo_checkpoint_path, file) for file in os.listdir(iter_dpo_checkpoint_path) if file.startswith('final_checkpoint_')]
+        n = len(final_checkpoints_path)
+
+        if n > 0:
+            ref_model_path = max(final_checkpoints_path, key=os.path.getctime)
+            config['ref_model'] = ref_model_path
+        else:
+            print('Did not find a DPO trained model!')
+            return
+    else:
+        print('Did not pass argument!')
+        return
+
+    cfg = config['IHL_args']
+    cfg['lr'] = float(cfg['lr'])
+    
     print("######################")
-    print("Saving to: ", cfg.save_dir)
+    print("Saving to: ", config['output_dir'])
     print("######################")
 
     num_devices = int(os.environ.get('WORLD_SIZE', 1))
@@ -60,53 +79,31 @@ def main(cfg):
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
 
-    set_seed(cfg.seed)
+    set_seed(cfg['seed'])
 
-    os.environ["WANDB_DISABLED"] = "true"
-    model_cfg = get_model_identifiers_from_yaml(cfg.model_family)
-    model_id = model_cfg["hf_key"]
-    if cfg.model_path is None:
-        cfg.model_path = model_cfg["ft_model_path"]
-
-    Path(cfg.save_dir).mkdir(parents=True, exist_ok=True)
-    # save cfg in cfg.save_dir
-    if local_rank == 0:
-        with open(f"{cfg.save_dir}/config.yaml", "w") as file:
-            OmegaConf.save(cfg, file)
+    model_id = config['ref_model']
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token = tokenizer.eos_token
 
-
-    if os.path.exists(cfg.save_dir):
-        print("Directory already exists")
-        if not cfg.overwrite_dir:
-            exit()
-
-    max_length = 500
-    if cfg.forget_loss == "dpo":
-        torch_format_dataset = TextForgetDatasetDPOQA(
-            cfg.data_path, 
-            tokenizer=tokenizer, 
-            model_family = cfg.model_family, 
-            max_length=max_length, 
-            split=cfg.split
-        )
+    max_length = config['max_length']
+    if cfg['forget_loss'] == "dpo":
+        return
     else:
         torch_format_dataset = TextForgetDatasetQA(
-            cfg.data_path, 
+             os.path.join(config['sample_save_dir'], 'samples_for_IHL'), 
             tokenizer=tokenizer, 
-            model_family=cfg.model_family, 
+            model_family='', 
             max_length=max_length, 
-            split=cfg.split, 
-            loss_type=cfg.forget_loss
+            split='forget', 
+            loss_type=cfg['forget_loss']
         )
     
-    batch_size = cfg.batch_size
-    gradient_accumulation_steps = cfg.gradient_accumulation_steps
+    batch_size =  cfg['batch_size']
+    gradient_accumulation_steps = cfg['gradient_accumulation_steps']
     steps_per_epoch = len(torch_format_dataset)//(batch_size*gradient_accumulation_steps*num_devices)
 
-    max_steps = int(cfg.num_epochs*len(torch_format_dataset))//(batch_size*gradient_accumulation_steps*num_devices)
+    max_steps = int(cfg['num_epochs']*len(torch_format_dataset))//(batch_size*gradient_accumulation_steps*num_devices)
     print(f"max_steps: {max_steps}")
 
     training_args = transformers.TrainingArguments(
@@ -115,87 +112,34 @@ def main(cfg):
         gradient_accumulation_steps=gradient_accumulation_steps,
         warmup_steps=max(1, steps_per_epoch),
         max_steps=max_steps,
-        learning_rate=cfg.lr,
+        learning_rate=cfg['lr'],
         bf16=True,
         bf16_full_eval=True,
         logging_steps=max(1,max_steps//20),
-        logging_dir=f'{cfg.save_dir}/logs',
-        output_dir=cfg.save_dir,
+        output_dir=config['output_dir'],
         optim="paged_adamw_32bit",
-        save_strategy="steps" if cfg.save_model and (not cfg.eval_only) else "no",
+        save_strategy='no',
         save_steps=steps_per_epoch,
         save_only_model=True,
         ddp_find_unused_parameters= False,
-        deepspeed='config/ds_config.json',
-        weight_decay = cfg.weight_decay,
+        deepspeed='IHL_config/ds_config.json',
+        weight_decay = cfg['weight_decay'],
         eval_steps = steps_per_epoch,
-        eval_strategy = "steps" if cfg.eval_while_train else "no",
-        seed=cfg.seed
+        eval_strategy ="no",
+        seed=cfg['seed']
     )
-    
-    #first get the base model architectur2e
-    #if there is a pytorch*.bin file in the model path, then load that. use regex there can be anythign in between pytorch and .bin
-    import re
-    path_found = False
-    
-    # Check if model_path is a local directory
-    if os.path.exists(cfg.model_path) and os.path.isdir(cfg.model_path):
-        for file in os.listdir(cfg.model_path):
-            if re.search(r"pytorch.*\.bin", file):
-                path_found = True
-                break
-            
-            if re.search(r"model-*\.safetensors", file):
-                path_found = True
-                break
-    else:
-        # It's a Hugging Face model identifier, not a local path
-        print(f"Model path '{cfg.model_path}' is not a local directory. Will load from Hugging Face.")
 
     oracle_model = None
 
-    if path_found:
-        config = AutoConfig.from_pretrained(model_id)
-
-        print("Loading from checkpoint")
-        model_kwargs = {
-            "config": config,
-            "torch_dtype": torch.bfloat16,
-            "trust_remote_code": True,
-            "ignore_mismatched_sizes": True
-        }
-        if model_cfg["flash_attention2"] == "true":
-            model_kwargs["attn_implementation"] = "flash_attention_2"
-        
-        model = AutoModelForCausalLM.from_pretrained(cfg.model_path, **model_kwargs)
-        if cfg.forget_loss == "KL" or "npo" in cfg.forget_loss:
-            oracle_kwargs = {
-                "config": config,
-                "torch_dtype": torch.bfloat16,
-                "trust_remote_code": True,
-                "ignore_mismatched_sizes": True
-            }
-            if model_cfg["flash_attention2"] == "true":
-                oracle_kwargs["attn_implementation"] = "flash_attention_2"
-            
-            oracle_model = AutoModelForCausalLM.from_pretrained(cfg.model_path, **oracle_kwargs)
-
-    else:
-        print("Loading after merge and unload")
-        merge_kwargs = {
-            "torch_dtype": torch.bfloat16,
-            "device_map": device_map
-        }
-        if model_cfg["flash_attention2"] == "true":
-            merge_kwargs["attn_implementation"] = "flash_attention_2"
-        
-        model = AutoModelForCausalLM.from_pretrained(model_id, **merge_kwargs)
-        #now use the checkpoint to add the LoRA modules
-        model = PeftModel.from_pretrained(model, model_id=cfg.model_path)
-        #save this as a standard model so that we can again do PEFT style finetuneing from scratch
-        model = model.merge_and_unload()
-        #save the model for next time
-        model.save_pretrained(cfg.model_path)
+    print("Loading after merge and unload")
+    merge_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "device_map": device_map
+    }
+    
+    merge_kwargs["attn_implementation"] = "flash_attention_2"
+    
+    model = AutoModelForCausalLM.from_pretrained(model_id, **merge_kwargs)
     
     
     # Hot fix for https://discuss.huggingface.co/t/help-with-llama-2-finetuning-setup/50035
@@ -205,47 +149,26 @@ def main(cfg):
     #if model_cfg["gradient_checkpointing"] == "true":
     #    model.gradient_checkpointing_enable()
 
-    if cfg.model_family == 'llama2-7b':
-        if cfg.LoRA.targets == "all":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
-        elif cfg.LoRA.targets == "self_attn":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
-        elif cfg.LoRA.targets == "mlp":
-            lora_targets = ['gate_proj', 'up_proj', 'down_proj']
-        else:
-            raise NotImplementedError
-    elif cfg.model_family == 'llama3.1-8b':
-        if cfg.LoRA.targets == "all":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
-        elif cfg.LoRA.targets == "self_attn":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
-        elif cfg.LoRA.targets == "mlp":
-            lora_targets = ['gate_proj', 'up_proj', 'down_proj']
-        else:
-            raise NotImplementedError
-    elif cfg.model_family == 'phi':
-        if cfg.LoRA.targets == "all":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'dense', 'fc1', 'fc2']
-        elif cfg.LoRA.targets == "self_attn":
-            lora_targets = ['q_proj', 'k_proj', 'v_proj', 'dense']
-        elif cfg.LoRA.targets == "mlp":
-            lora_targets = ['fc1', 'fc2']
-        else:
-            raise NotImplementedError
+    LORA_config_dict = cfg['LORA']
+    if LORA_config_dict['targets'] == 'all':
+        lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+    elif LORA_config_dict['targets'] == 'self_attn':
+        lora_targets = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+    elif LORA_config_dict['targets'] == 'mlp':
+        lora_targets = ['gate_proj', 'up_proj', 'down_proj']
     else:
         raise NotImplementedError
     
-    
-    config = LoraConfig(
-        r=cfg.LoRA.r, 
-        lora_alpha=cfg.LoRA.alpha, 
+    lora_config = LoraConfig(
+        r=LORA_config_dict['r'], 
+        lora_alpha=LORA_config_dict['alpha'], 
         target_modules=lora_targets,
-        lora_dropout=cfg.LoRA.dropout,
+        lora_dropout=LORA_config_dict['dropout'],
         bias="none", 
         task_type="CAUSAL_LM"
     )
-    if cfg.LoRA.r != 0:
-        model = get_peft_model(model, config)
+    if lora_config.r != 0:
+        model = get_peft_model(model, lora_config)
         print_trainable_parameters(model)
 
     ### MODIFY MODEL WEIGHTS BASED ON IMPORTANCES
@@ -253,104 +176,40 @@ def main(cfg):
         names = access_string.split(sep='.')
         return reduce(getattr, names, module)
 
-    if cfg.importance_file: # if using FILA
-
-        print(f'loading importance file from {cfg.importance_file}')
-        imp_file = torch.load(cfg.importance_file, map_location='cpu')
-        
-        f_cnt = imp_file['f_cnt']
-        r_cnt = imp_file['r_cnt']
-        importance_f = imp_file['importance_f']
-        importance_r = imp_file['importance_r']
-        
-        print(f"Loaded importance file with {len(importance_f)} layers")
-        print(f"Forget count: {f_cnt}, Retain count: {r_cnt}")
-        
-        importances = {n: torch.div(importance_f[n]/f_cnt, 1e-5+(importance_r[n]/r_cnt)) for n in importance_f.keys()}
-
-        initialized_layers = 0
-        for old_name, importance in importances.items():
-
-            if not any([target_name in old_name for target_name in lora_targets]):
-                continue
-            name = old_name.replace("module.", '')
-            lora_A_path = 'base_model.model.'+name.replace(".weight", '')+'.lora_A.default'
-            lora_B_path = 'base_model.model.'+name.replace(".weight", '')+'.lora_B.default'
-            base_layer_path = 'base_model.model.'+name.replace(".weight", '')+'.base_layer'
-            scaling_path = 'base_model.model.'+name.replace(".weight", '')+'.scaling'
-
-            try:
-                lora_A = get_module_by_name(model, lora_A_path)
-                lora_B = get_module_by_name(model, lora_B_path)
-                base_layer = get_module_by_name(model, base_layer_path)
-                scaling = get_module_by_name(model, scaling_path)
-            except AttributeError as e:
-                print(f"Warning: Could not access module {name}: {e}")
-                continue
-
-            orig_shape = base_layer.weight.shape
-            W = base_layer.weight.data.reshape(orig_shape)
-            dtype = W.dtype
-            W = W.to(torch.float32)
-
-            # Solve row-wise weighted low-rank approximation
-            row_importance = importance.sum(dim=1).sqrt().to(W.device) # row-wise sum
-            U, S, V = torch.svd_lowrank(row_importance[:,None] * W, q=cfg.LoRA.r)
-
-            S = S / scaling
-
-            new_lora_A = (V * torch.sqrt(S)).t()
-            new_lora_B = (1/(row_importance+1e-5))[:,None] * (U * torch.sqrt(S))
-            new_residual = base_layer.weight.data.reshape(orig_shape) - scaling * new_lora_B @ new_lora_A
-
-            lora_A.weight.data = new_lora_A.contiguous().to(dtype)
-            lora_B.weight.data = new_lora_B.contiguous().to(dtype)
-            base_layer.weight.data = new_residual.contiguous().to(dtype)
-            
-            initialized_layers += 1
-        
-        print(f"FILA: Initialized {initialized_layers} LoRA layers with importance-weighted decomposition")
     
     trainer = CustomTrainerForgetting(
         model=model,
         train_dataset=torch_format_dataset,
         eval_dataset=torch_format_dataset,
-        compute_metrics=None,
+        compute_metrics=None, # the callback for computing metrics, None in this case since you're doing it in your callback
+        # callbacks=[GlobalStepDeletionCallback], 
         args=training_args,
         data_collator=custom_data_collator_forget,
         oracle_model = oracle_model,
-        forget_loss = cfg.forget_loss,
-        eval_cfg = cfg.eval,
-        seed = cfg.seed, # for NPO
-        ref_policy = cfg.ref_policy,
-        beta = cfg.beta,
-        npo_coeff=cfg.npo_coeff,
-        grad_diff_coeff=cfg.grad_diff_coeff,
-        KL_coeff=cfg.KL_coeff,
+        forget_loss = cfg['forget_loss'],
+        eval_cfg = False,
+        seed = cfg['seed'], # for NPO
+        ref_policy = cfg['ref_policy'],
+        beta = cfg['beta'],
+        npo_coeff=cfg['npo_coeff'],
+        grad_diff_coeff=cfg['grad_diff_coeff'],
+        KL_coeff=cfg['KL_coeff'],
     )
     
     # Set tokenizer separately
     trainer.tokenizer = tokenizer
     
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
-    if cfg.eval_only:
-        trainer.evaluate()
-    else:
-        trainer.train()
 
-    if cfg.save_model and (not cfg.eval_only):
-        if cfg.importance_file:
-            model = model.merge_and_unload()
-        model.save_pretrained(cfg.save_dir)
-        tokenizer.save_pretrained(cfg.save_dir)
+    output_dir = os.path.join(config['output_dir'], f"final_checkpoint_{n}")
+    trainer.train()
 
-    #delete all "global_step*" files in the save_dir/checkpoint-*/ directories
-    if local_rank == 0:
-        for file in Path(cfg.save_dir).glob("checkpoint-*"):
-            for global_step_dir in file.glob("global_step*"):
-                #delete the directory
-                import shutil
-                shutil.rmtree(global_step_dir)
+    merged_model = model.merge_and_unload()
+    # Overides the previous checkpoint
+    merged_model.save_pretrained(output_dir)
+
+    print('Merged and Saved Model!')
+
 
 if __name__ == "__main__":
     main()

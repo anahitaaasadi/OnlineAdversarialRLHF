@@ -1,7 +1,6 @@
 import os
 import json
 import yaml
-import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -11,11 +10,6 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from DPO_alignment import H4ArgumentParser
 from trl import DPOConfig, ModelConfig, DPOTrainer
-from trl.data_utils import maybe_apply_chat_template
-# from DPO_utils import MyDPOTrainer
-
-from data import PreferenceSamplerConfig, PreferenceSampler
-from uncertainty import UncertaintyConfig, get_uncertainity_scores
 
 @dataclass
 class ScriptArguments:
@@ -37,6 +31,7 @@ class ScriptArguments:
     eot_token: Optional[str] = field(default="<|eot_id|>")
     len_penalty: Optional[float] = field(default=0.0)
 
+
     # === PreferenceSamplerConfig fields ===
     samples_drawn_size: int = field(default=2100)
     train_samples_drawn_size: int = field(default=2000)
@@ -46,6 +41,7 @@ class ScriptArguments:
     ref_gpu_utlization: float = field(default=0.5)
     rm_batch_size: int = field(default=8)
     sample_save_dir: str = field(default='samples')
+    calculate_uncertainty_scores: bool = field(default='false')
 
     # Corruption Params
     corrupt_preferences: bool = field(default=True)
@@ -54,12 +50,12 @@ class ScriptArguments:
 
     # Mitigation params
     mitigate_corruption: bool = field(default=False)
-
+    mitigate_corruption_IHL: bool = field(default=False)
 
     def __post_init__(self):
         if self.corrupt_preferences:
-            if self.corrupt_preferences > 1.0 or self.corrupt_preferences < 0.0:
-                self.corrupt_preferences = 0.2  
+            if self.corruption_percentage > 1.0 or self.corruption_percentage < 0.0:
+                self.corruption_percentage = 0.2  
 
 
 def corrupt_data(pos: list, neg: list, prompts: list, margin: list, args: ScriptArguments) -> tuple[list, list, list, list]:
@@ -106,6 +102,26 @@ def attack_mitigation(pos: list, neg: list, prompts: list, margin: list, corrupt
     return pos, neg, prompts, margin
 
 
+def attack_mitgation_IHL(corrupted_scores: np.ndarray) -> tuple[list, list]:
+    threshold = 1.01
+    forget_indices = []
+    retain_indices = []
+
+    for idx in range(len(corrupted_scores)):
+        score = corrupted_scores[idx]
+
+        threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) <= threshold
+        inv_threshold_bool = (score[0, :] / score[1, :]).mean(axis=-1) >= 1/threshold
+
+        should_forget = threshold_bool and not inv_threshold_bool
+
+        if should_forget:
+            forget_indices.append(idx)
+        else:
+            retain_indices.append(idx)
+
+    return retain_indices, forget_indices
+
 
 def prepare_data(
     args: ScriptArguments,
@@ -114,7 +130,8 @@ def prepare_data(
     margin_scale=1,
     eot_token="",
     is_train=True,
-    uncertainty_scores: np.ndarray | None = None
+    uncertainty_scores: np.ndarray | None = None,
+    n: int = 1
 ) -> Dataset:
 
     pos = []
@@ -138,6 +155,31 @@ def prepare_data(
         if args.mitigate_corruption and uncertainty_scores is not None:
             corrupted_scores = corrupt_scores(scores, args)
             pos, neg, prompts, margin = attack_mitigation(pos, neg, prompts, margin, corrupted_scores)
+        elif args.mitigate_corruption_IHL and uncertainty_scores is not None:
+            corrupted_scores = corrupt_scores(scores, args)
+            retain_indices, forget_indices = attack_mitgation_IHL(corrupted_scores)
+
+            retain_data = {
+                'question': [prompts[i] for i in retain_indices],
+                'answer': [neg[i] for i in retain_indices],
+            }
+
+            forget_data = {
+                'question': [prompts[i] for i in forget_indices],
+                'answer': [pos[i] for i in forget_indices],
+            }
+
+            samples_for_IHL = {
+                'retain': retain_data,
+                'forget': forget_data
+            }
+
+            path = os.path.join(args.sample_save_dir, 'samples_for_IHL')
+            os.makedirs(path, exist_ok=True)
+
+            with open(os.path.join(path, f'corrupted_samples_{n}.json')) as f:
+                    json.dump(samples_for_IHL, fp=f, indent=4)
+
             
     dataset = Dataset.from_dict({"prompt": prompts, "chosen": pos, "rejected": neg, "margin": margin})
 
@@ -150,7 +192,8 @@ def prepare_data(
 def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     train_samples = {}
     eval_samples = {}
-    for sample_fp in sorted([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.json')], key=os.path.getctime):
+    root = args.sample_save_dir
+    for sample_fp in sorted([os.path.join(root, file) for file in os.listdir(root) if file.endswith('.json')], key=os.path.getctime):
         with open(sample_fp) as fp:
             pref_pairs = list(json.load(fp).items())
             train_pref_pairs = {k: v for (k, v) in pref_pairs[:args.train_samples_drawn_size]}
@@ -162,9 +205,16 @@ def load_data(args: ScriptArguments) -> tuple[dict, dict]:
     return train_samples, eval_samples
 
 
-def load_uncertainty_scores() -> np.ndarray:
-    fp = max([os.path.join('samples', file) for file in os.listdir('samples') if file.endswith('.npz')], key=os.path.getctime)
-    return np.load(fp)['arr_0']
+def load_uncertainty_scores(args: ScriptArguments) -> np.ndarray | None:
+    root = args.sample_save_dir
+    fps = [os.path.join(root, file) for file in os.listdir(root) if file.endswith('.npz')]
+    if fps:
+        fp = max(fps, key=os.path.getctime)
+        return np.load(fp)['arr_0']
+    
+    print(f'Did not find any .npz files at {root}')
+
+    return None
 
 
 if __name__ == "__main__":
@@ -189,7 +239,10 @@ if __name__ == "__main__":
     print(f'Mitigating attacks : {script_args.mitigate_corruption}')
 
     train_pref_pairs, eval_pref_pairs = load_data(script_args)
-    scores = load_uncertainty_scores()
+    if script_args.mitigate_corruption:
+        scores = load_uncertainty_scores(script_args)
+    else:
+        scores = None
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
@@ -207,6 +260,8 @@ if __name__ == "__main__":
         ref_name = script_args.ref_model
     else:
         ref_name = model_config.model_name_or_path
+
+    print(f'Ref model {ref_name}')
 
     model_ref = AutoModelForCausalLM.from_pretrained(
         ref_name,
@@ -226,6 +281,7 @@ if __name__ == "__main__":
         model_ref.config.pad_token_id = tokenizer.pad_token_id
         model.resize_token_embeddings(len(tokenizer))
         model_ref.resize_token_embeddings(len(tokenizer))
+        print('Tokenizer modified!')
 
     train_dataset = prepare_data(
         args=script_args,
@@ -234,7 +290,8 @@ if __name__ == "__main__":
         margin_scale=script_args.margin_scale,
         eot_token=script_args.eot_token,
         is_train=True,
-        uncertainty_scores=scores
+        uncertainty_scores=scores,
+        n=n + 1
     )
     
     eval_dataset = prepare_data(
@@ -245,10 +302,6 @@ if __name__ == "__main__":
         eot_token=script_args.eot_token,
         is_train=False
     )
-
-    os.environ["WANDB_MODE"] = "offline"
-    os.environ["WANDB_DIR"] = os.getcwd()
-    os.environ["WANDB_PROJECT"] = "iter_DPO"
 
     dpo_trainer = DPOTrainer(
         model,
@@ -267,229 +320,6 @@ if __name__ == "__main__":
     dpo_trainer.model.save_pretrained(output_dir)
     dpo_trainer.processing_class.save_pretrained(output_dir)
 
-    with open(f'log_history_{n + 1}.json', mode='w') as f:
+    with open(os.path.join(output_dir, f'log_history_{n + 1}.json'), mode='w') as f:
         json.dump(dpo_trainer.state.log_history, fp=f, indent=4)
 
-    # Unlearn corrupted data if corruption was applied
-    if script_args.corrupt_preferences and script_args.mitigate_corruption:
-        print("\n" + "="*80)
-        print("Starting unlearning process for corrupted data")
-        print("="*80)
-        
-        # Step 1: Identify corrupted samples
-        n_samples = len(train_pref_pairs)
-        corrupted_idx_count = int(script_args.corruption_percentage * n_samples)
-        np.random.seed(script_args.corruption_seed)
-        corrupted_indices = np.random.permutation(np.arange(n_samples))[:corrupted_idx_count]
-        
-        # Save corrupted samples for unlearning
-        corrupted_data_dir = os.path.join("data", "forget_samples")
-        os.makedirs(corrupted_data_dir, exist_ok=True)
-        
-        corrupted_samples_path = os.path.join(corrupted_data_dir, f"corrupted_samples_iter_{n + 1}.json")
-        forget_data_path = os.path.join(corrupted_data_dir, f"forget_data_iter_{n + 1}.json")
-        
-        # Prepare corrupted samples in the format expected by IHL
-        prompts_list = list(train_pref_pairs.keys())
-        corrupted_samples = []
-        retain_samples = []
-        
-        for idx, (prompt_key, pairs) in enumerate(train_pref_pairs.items()):
-            sample = {
-                "question": prompt_key,
-                "answer": pairs["best_response"].removeprefix(prompt_key),
-                "paraphrased_answer": pairs["worst_response"].removeprefix(prompt_key)
-            }
-            
-            if idx in corrupted_indices:
-                corrupted_samples.append(sample)
-            else:
-                retain_samples.append(sample)
-        
-        # Save forget and retain data
-        forget_dataset = {
-            "forget": corrupted_samples,
-            "retain": retain_samples
-        }
-        
-        with open(forget_data_path, 'w') as f:
-            json.dump(forget_dataset, f, indent=2)
-        
-        print(f"Saved {len(corrupted_samples)} corrupted samples to {forget_data_path}")
-        print(f"Saved {len(retain_samples)} retain samples")
-        
-        # Step 2: Measure importance using IHL_measure_importance logic
-        print("\n" + "-"*80)
-        print("Step 1: Measuring parameter importance")
-        print("-"*80)
-        
-        from IHL_measure_importance import main as measure_importance_main
-        from omegaconf import OmegaConf
-        
-        # Create config for importance measurement
-        importance_config = {
-            "model_family": "phi",
-            "model_path": output_dir,
-            "data_path": forget_data_path,
-            "split": "forget",
-            "batch_size": 8,
-            "gradient_accumulation_steps": 4,
-            "num_epochs": 1,
-            "lr": 1e-5,
-            "weight_decay": 0.01,
-            "save_model": False,
-            "eval_only": False,
-            "eval_while_train": False,
-            "seed": 42,
-            "forget_loss": "grad_diff",
-            "LoRA": {
-                "r": 0,
-                "alpha": 32,
-                "dropout": 0.05,
-                "targets": "all"
-            },
-            "npo_coeff": 1.0,
-            "grad_diff_coeff": 1.0,
-            "KL_coeff": 1.0,
-            "ref_policy": "fine_tuned",
-            "beta": 0.1,
-            "eval": {
-                "model_path": output_dir,
-                "model_family": "phi",
-                "save_dir": output_dir,
-                "data_path": [forget_data_path],
-                "split": "forget",
-                "split_list": ["forget"],
-                "eval_task": ["eval_log"],
-                "question_key": ["question"],
-                "answer_key": ["answer"],
-                "base_answer_key": ["paraphrased_answer"]
-            }
-        }
-        
-        importance_save_path = f"./importances/phi_forget{str(script_args.corruption_percentage).replace('.', '')}_iter_{n + 1}.pt"
-        os.makedirs("./importances", exist_ok=True)
-        
-        try:
-            # Run importance measurement
-            print(f"Computing importance scores and saving to {importance_save_path}")
-            # Note: This would need to be run in a subprocess or refactored to be callable
-            # For now, we'll prepare the command to run
-            import subprocess
-            importance_cmd = [
-                "python", "IHL_measure_importance.py",
-                f"model_family=phi",
-                f"model_path={output_dir}",
-                f"data_path={forget_data_path}",
-                f"split=forget",
-                "batch_size=8",
-                "gradient_accumulation_steps=4",
-                "num_epochs=1",
-                f"lr=1e-5",
-                "forget_loss=grad_diff"
-            ]
-            
-            print(f"Running: {' '.join(importance_cmd)}")
-            result = subprocess.run(importance_cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print(f"Warning: Importance measurement failed: {result.stderr}")
-            else:
-                print("Importance measurement completed successfully")
-                
-        except Exception as e:
-            print(f"Warning: Could not run importance measurement: {e}")
-            importance_save_path = None
-        
-        # Step 3: Forget using IHL_forget
-        print("\n" + "-"*80)
-        print("Step 2: Forgetting corrupted samples")
-        print("-"*80)
-        
-        forget_save_dir = os.path.join("llm_weights", f"forget_corrupted_iter_{n + 1}")
-        
-        forget_config = {
-            "model_family": "phi",
-            "model_path": output_dir,
-            "data_path": forget_data_path,
-            "split": "forget",
-            "batch_size": 8,
-            "gradient_accumulation_steps": 4,
-            "num_epochs": 3,
-            "lr": 1e-5,
-            "weight_decay": 0.01,
-            "save_model": True,
-            "save_dir": forget_save_dir,
-            "overwrite_dir": True,
-            "eval_only": False,
-            "eval_while_train": False,
-            "seed": 42,
-            "forget_loss": "grad_ascent",
-            "importance_file": importance_save_path if importance_save_path and os.path.exists(importance_save_path) else None,
-            "LoRA": {
-                "r": 8,
-                "alpha": 16,
-                "dropout": 0.1,
-                "targets": "all"
-            },
-            "npo_coeff": 1.0,
-            "grad_diff_coeff": 1.0,
-            "KL_coeff": 1.0,
-            "ref_policy": "fine_tuned",
-            "beta": 0.1,
-            "eval": {
-                "model_path": output_dir,
-                "model_family": "phi",
-                "save_dir": forget_save_dir,
-                "data_path": [forget_data_path],
-                "split": "forget",
-                "split_list": ["forget"],
-                "eval_task": ["eval_log"],
-                "question_key": ["question"],
-                "answer_key": ["answer"],
-                "base_answer_key": ["paraphrased_answer"]
-            }
-        }
-        
-        # Save config for reference
-        config_path = os.path.join(forget_save_dir, "config.yaml")
-        os.makedirs(forget_save_dir, exist_ok=True)
-        
-        with open(config_path, 'w') as f:
-            yaml.dump(forget_config, f)
-        
-        try:
-            # Run forgetting
-            forget_cmd = [
-                "python", "IHL_forget.py",
-                f"model_family=phi",
-                f"model_path={output_dir}",
-                f"data_path={forget_data_path}",
-                f"split=forget",
-                f"save_dir={forget_save_dir}",
-                "batch_size=8",
-                "gradient_accumulation_steps=4",
-                "num_epochs=3",
-                f"lr=1e-5",
-                "forget_loss=grad_ascent",
-                "save_model=true",
-                "overwrite_dir=true"
-            ]
-            
-            if importance_save_path and os.path.exists(importance_save_path):
-                forget_cmd.append(f"importance_file={importance_save_path}")
-            
-            print(f"Running: {' '.join(forget_cmd)}")
-            result = subprocess.run(forget_cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print(f"Warning: Forgetting failed: {result.stderr}")
-            else:
-                print(f"Forgetting completed successfully. Model saved to {forget_save_dir}")
-                
-        except Exception as e:
-            print(f"Warning: Could not run forgetting: {e}")
-        
-        print("\n" + "="*80)
-        print("Unlearning process completed")
-        print("="*80)
